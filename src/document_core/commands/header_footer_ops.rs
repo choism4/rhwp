@@ -1021,18 +1021,92 @@ impl DocumentCore {
             count
         }
 
-        // 1) 직렬화 source-of-truth: paragraphs[0].controls의 SectionDef Box
+        // 0) source 비어있으면 mirror 에서 복제 — 라운드트립으로 source 가 비고 mirror 만 채워진 케이스 대응.
+        //    직렬화는 paragraphs[0].controls SectionDef.extra_child_records (line 233 serializer/control.rs) 만 사용.
+        let mirror_records = section.section_def.extra_child_records.clone();
+        let mut sd_was_empty = false;
         for para in section.paragraphs.iter_mut() {
             for ctrl in para.controls.iter_mut() {
                 if let Control::SectionDef(sd) = ctrl {
-                    replaced += apply_replace(&mut sd.extra_child_records, from, to);
+                    if sd.extra_child_records.is_empty() && !mirror_records.is_empty() {
+                        sd.extra_child_records = mirror_records.clone();
+                        sd_was_empty = true;
+                    }
                 }
             }
         }
+        let _ = sd_was_empty;
+        // 1) 직렬화 source-of-truth: paragraphs[0].controls의 SectionDef Box
+        let mut src_replaced = 0usize;
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    src_replaced += apply_replace(&mut sd.extra_child_records, from, to);
+                }
+            }
+        }
+        replaced += src_replaced;
         // 2) section_def 미러
-        apply_replace(&mut section.section_def.extra_child_records, from, to);
+        let mirror_replaced = apply_replace(&mut section.section_def.extra_child_records, from, to);
+        replaced += mirror_replaced;
 
-        // master_pages 파싱된 뷰는 렌더링 전용 — 동기화 생략 (export는 extra_child_records만 사용).
+        // 3) master_pages 파싱된 뷰도 sync.
+        // PDF/SVG 렌더 path는 master_pages 모델의 paragraph.text 를 사용하므로,
+        // extra_child_records 만 갱신하면 export 는 OK 지만 in-memory 렌더는 baseline 텍스트 그대로 노출됨.
+        // 2026-05-14 회귀: KBS/MBC/SBS 본문에 "검사내전 제 10 화" 등 baseline footer 잔존.
+        // master_pages 는 section.section_def.master_pages 및 paragraphs[0].controls 의 SectionDef 박스 두 곳에 존재.
+        //
+        // footer 텍스트는 보통 outer paragraph 가 아니라 그 안의 Shape(글상자) -> TextBox.paragraphs[i].text 에 있음.
+        // 그래서 outer paragraphs + 모든 Shape 의 text_box.paragraphs 까지 재귀 sync.
+        fn sync_paragraph(para: &mut crate::model::paragraph::Paragraph, from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            if para.text.contains(from) {
+                let new_text = para.text.replace(from, to);
+                let new_utf16: Vec<u16> = new_text.encode_utf16().collect();
+                let new_char_count = new_utf16.len() as u32;
+                let mut new_offsets: Vec<u32> = Vec::with_capacity(new_text.chars().count() + 1);
+                let mut idx: u32 = 0;
+                for ch in new_text.chars() {
+                    new_offsets.push(idx);
+                    let mut buf = [0u16; 2];
+                    idx += ch.encode_utf16(&mut buf).len() as u32;
+                }
+                new_offsets.push(idx);
+                para.text = new_text;
+                para.char_count = new_char_count;
+                para.char_offsets = new_offsets;
+                para.line_segs.clear();
+                count += 1;
+            }
+            // 안에 글상자가 있을 수 있음 — 재귀 sync.
+            for ctrl in para.controls.iter_mut() {
+                if let Control::Shape(shape) = ctrl {
+                    if let Some(tb) = shape.text_box.as_mut() {
+                        for inner_para in tb.paragraphs.iter_mut() {
+                            count += sync_paragraph(inner_para, from, to);
+                        }
+                    }
+                }
+            }
+            count
+        }
+        fn sync_master(masters: &mut [crate::model::header_footer::MasterPage], from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            for master in masters.iter_mut() {
+                for para in master.paragraphs.iter_mut() {
+                    count += sync_paragraph(para, from, to);
+                }
+            }
+            count
+        }
+        replaced += sync_master(&mut section.section_def.master_pages, from, to);
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    replaced += sync_master(&mut sd.master_pages, from, to);
+                }
+            }
+        }
 
         section.raw_stream = None;
         self.mark_section_dirty(section_idx);
