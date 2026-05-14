@@ -1066,17 +1066,24 @@ impl DocumentCore {
             let has_autonum = para.controls.iter().any(|c| matches!(c, Control::AutoNumber(_)));
             if has_autonum {
                 // controls 안 Shape 글상자만 재귀 sync (outer paragraph 자체는 마커 보존)
+                let mut inner_count = 0usize;
                 for ctrl in para.controls.iter_mut() {
                     if let Control::Shape(shape) = ctrl {
                         if let Some(drawing) = shape.as_mut().drawing_mut() {
                             if let Some(tb) = drawing.text_box.as_mut() {
                                 for inner_para in tb.paragraphs.iter_mut() {
-                                    count += sync_paragraph(inner_para, from, to);
+                                    inner_count += sync_paragraph(inner_para, from, to);
                                 }
                             }
                         }
                     }
                 }
+                // Shape inner text 변경 시 outer paragraph 의 line_segs 캐시 invalidate.
+                // 미수행 시 renderer 가 stale 한 라인 레이아웃을 재사용하여 AutoNumber 마커 시각 위치 drift.
+                if inner_count > 0 {
+                    para.line_segs.clear();
+                }
+                count += inner_count;
                 return count;
             }
             if para.text.contains(from) {
