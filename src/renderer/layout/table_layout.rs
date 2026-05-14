@@ -10,6 +10,7 @@ use super::super::page_layout::LayoutRect;
 use super::super::height_measurer::MeasuredTable;
 use super::super::composer::{compose_paragraph, ComposedParagraph};
 use super::super::style_resolver::ResolvedStyleSet;
+use super::super::{format_number, NumberFormat as NumFmt};
 
 /// [Task #548] paragraph 의 line N 에 적용되는 effective margin_left.
 /// paragraph_layout.rs 의 line_indent 산식과 동일 (단일 룰).
@@ -1354,14 +1355,19 @@ impl LayoutEngine {
             }
 
             // AutoNumber(Page) 치환: 셀 내 쪽번호 필드를 현재 페이지 번호로 변환
+            // AutoNumber.format(HWP 표 134)을 존중하여 Arabic/A,B,C 등 양식 적용.
             let current_pn = self.current_page_number.get();
             if current_pn > 0 {
                 for (cpi, para) in cell.paragraphs.iter().enumerate() {
-                    let has_page_auto = para.controls.iter().any(|c|
-                        matches!(c, Control::AutoNumber(an)
-                            if an.number_type == crate::model::control::AutoNumberType::Page));
-                    if has_page_auto {
-                        let page_str = current_pn.to_string();
+                    let page_auto_format: Option<u8> = para.controls.iter().find_map(|c|
+                        if let Control::AutoNumber(an) = c {
+                            if an.number_type == crate::model::control::AutoNumberType::Page {
+                                Some(an.format)
+                            } else { None }
+                        } else { None }
+                    );
+                    if let Some(fmt_byte) = page_auto_format {
+                        let page_str = format_number(current_pn as u16, NumFmt::from_hwp_format(fmt_byte));
                         if let Some(comp) = composed_paras.get_mut(cpi) {
                             for line in &mut comp.lines {
                                 for run in &mut line.runs {

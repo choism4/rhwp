@@ -921,6 +921,38 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 구역의 바탕쪽(master page)을 전부 제거한다.
+    ///
+    /// 반환: JSON `{"ok":true,"cleared":N}`
+    #[wasm_bindgen(js_name = clearMasterPages)]
+    pub fn clear_master_pages(&mut self, section_idx: u32) -> Result<String, JsValue> {
+        self.clear_master_pages_native(section_idx as usize)
+            .map_err(|e| e.into())
+    }
+
+    /// 구역의 바탕쪽(master page) 텍스트를 find-and-replace 한다.
+    ///
+    /// 반환: JSON `{"ok":true,"replaced":N}`
+    #[wasm_bindgen(js_name = replaceTextInMasterPages)]
+    pub fn replace_text_in_master_pages(
+        &mut self,
+        section_idx: u32,
+        from: &str,
+        to: &str,
+    ) -> Result<String, JsValue> {
+        self.replace_text_in_master_pages_native(section_idx as usize, from, to)
+            .map_err(|e| e.into())
+    }
+
+    /// 구역의 바탕쪽(master page) paragraph 텍스트를 모두 읽어 반환.
+    ///
+    /// 반환: JSON `{"ok":true,"texts":["...","..."]}`
+    #[wasm_bindgen(js_name = getMasterPagesText)]
+    pub fn get_master_pages_text(&self, section_idx: u32) -> Result<String, JsValue> {
+        self.get_master_pages_text_native(section_idx as usize)
+            .map_err(|e| e.into())
+    }
+
     /// 머리말/꼬리말 문단 정보 조회
     ///
     /// 반환: JSON `{"ok":true,"paraCount":N,"charCount":N}`
@@ -2545,6 +2577,92 @@ impl HwpDocument {
             parent_para_idx as usize,
             control_idx as usize,
             props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// section 본문 paragraph 의 plain text(`paragraph.text`)를 그대로 반환.
+    /// inline 컨트롤(표/도형 등) 의 char 마커는 포함될 수 있으나 inline t 의
+    /// 실제 텍스트도 포함된다 (UTF-16 디코드 결과).
+    #[wasm_bindgen(js_name = getParagraphText)]
+    pub fn get_paragraph_text(&self, section_idx: u32, para_idx: u32) -> String {
+        self.document
+            .sections
+            .get(section_idx as usize)
+            .and_then(|s| s.paragraphs.get(para_idx as usize))
+            .map(|p| p.text.clone())
+            .unwrap_or_default()
+    }
+
+    /// 표 셀 / 도형 글상자 / 캡션 내부 paragraph 의 text 반환.
+    /// cell_idx 는 표의 cell 인덱스 (caption=65534), shape textbox 는 cell_idx=0.
+    #[wasm_bindgen(js_name = getCellParagraphText)]
+    pub fn get_cell_paragraph_text(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+    ) -> String {
+        self.get_cell_paragraph_ref(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
+        )
+        .map(|p| p.text.clone())
+        .unwrap_or_default()
+    }
+
+    /// 본문 paragraph + 표 셀 + 도형 글상자 + 캡션 모든 paragraph 의 text 에서 from→to 치환.
+    /// `replace_text_in_body` 의 재귀 버전 — inline 컨트롤 내부도 처리.
+    ///
+    /// 반환: JSON `{"ok":true,"replaced":N}`
+    #[wasm_bindgen(js_name = replaceTextEverywhere)]
+    pub fn replace_text_everywhere(
+        &mut self,
+        section_idx: u32,
+        from: &str,
+        to: &str,
+    ) -> Result<String, JsValue> {
+        self.replace_text_everywhere_native(section_idx as usize, from, to)
+            .map_err(|e| e.into())
+    }
+
+    /// section 본문 paragraph 들의 text 에서 from→to 치환.
+    /// inline 컨트롤(표/도형 등) 은 손대지 않고 paragraph.text 만 대상.
+    ///
+    /// 반환: JSON `{"ok":true,"replaced":N}`
+    #[wasm_bindgen(js_name = replaceTextInBody)]
+    pub fn replace_text_in_body(
+        &mut self,
+        section_idx: u32,
+        from: &str,
+        to: &str,
+    ) -> Result<String, JsValue> {
+        self.replace_text_in_body_native(section_idx as usize, from, to)
+            .map_err(|e| e.into())
+    }
+
+    /// 글상자(Shape 내부 TextBox) 텍스트를 한 문장으로 교체한다.
+    /// 첫 paragraph 만 유지하고 나머지는 비운다.
+    ///
+    /// 반환: JSON `{"ok":true}`
+    #[wasm_bindgen(js_name = setTextBoxText)]
+    pub fn set_text_box_text(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        text: &str,
+    ) -> Result<String, JsValue> {
+        self.set_text_box_text_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            text,
         )
         .map_err(|e| e.into())
     }
@@ -5137,6 +5255,34 @@ impl HwpDocument {
     ) -> Result<String, JsValue> {
         self.core
             .add_bookmark_native(sec as usize, para as usize, char_offset as usize, name)
+            .map_err(|e| e.into())
+    }
+
+    /// NewNumber(Page=number) 컨트롤 삽입. 해당 단락이 처음 등장하는 페이지의
+    /// 카운터를 `number` 로 리셋한다.
+    #[wasm_bindgen(js_name = addNewNumber)]
+    pub fn add_new_number(
+        &mut self,
+        sec: u32,
+        para: u32,
+        char_offset: u32,
+        number: u32,
+    ) -> Result<String, JsValue> {
+        self.core
+            .add_new_number_native(sec as usize, para as usize, char_offset as usize, number as u16)
+            .map_err(|e| e.into())
+    }
+
+    /// 구역의 모든 바탕쪽 안 AutoNumber(Page).format 일괄 변경.
+    /// `format` HWP 스펙 표 134 — 0=Digit, 4=LatinUpper(A,B,C), 5=LatinLower(a,b,c).
+    #[wasm_bindgen(js_name = setMasterPagePageNumberFormat)]
+    pub fn set_master_page_page_number_format(
+        &mut self,
+        sec: u32,
+        format: u8,
+    ) -> Result<String, JsValue> {
+        self.core
+            .set_master_page_page_number_format_native(sec as usize, format)
             .map_err(|e| e.into())
     }
 

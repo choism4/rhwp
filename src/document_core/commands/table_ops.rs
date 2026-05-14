@@ -978,6 +978,16 @@ impl DocumentCore {
             }
         }
 
+        // FIX (2026-05-14): table.attr 변경(textWrap/vertRelTo/vertAlign/horzRelTo/horzAlign/
+        // restrictInPage/allowOverlap)이 export 시 무시되던 회귀. serializer 의
+        // serialize_table() 가 CTRL_HEADER raw bytes 로 `table.raw_ctrl_data` 를 그대로
+        // 직렬화 → `raw_ctrl_data[0..4]` (CommonObjAttr.attr u32 LE) 와 `table.attr` 동기화.
+        while table.raw_ctrl_data.len() < 4 {
+            table.raw_ctrl_data.push(0);
+        }
+        let attr_bytes = table.attr.to_le_bytes();
+        table.raw_ctrl_data[0..4].copy_from_slice(&attr_bytes);
+
         // 캡션 생성/수정
         let mut caption_created = false;
         if let Some(has_cap) = json_bool(json, "hasCaption") {

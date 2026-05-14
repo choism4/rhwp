@@ -233,7 +233,7 @@ fn collect_bookmarks_from_paragraphs(
 }
 
 /// 문단 내 char_offset에 해당하는 컨트롤 삽입 위치를 결정
-fn find_control_insert_index(
+pub(crate) fn find_control_insert_index(
     para: &crate::model::paragraph::Paragraph,
     char_offset: usize,
 ) -> usize {
@@ -248,7 +248,7 @@ fn find_control_insert_index(
 }
 
 /// char_offset을 raw char_offset (파서 원본 기준)으로 변환
-fn char_offset_to_raw(
+pub(crate) fn char_offset_to_raw(
     para: &crate::model::paragraph::Paragraph,
     char_offset: usize,
     insert_idx: usize,

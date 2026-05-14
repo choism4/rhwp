@@ -924,6 +924,227 @@ impl DocumentCore {
 
         Ok("{\"ok\":true}".to_string())
     }
+
+    /// 구역의 바탕쪽(master page) 텍스트를 find-and-replace 한다.
+    ///
+    /// extra_child_records의 PARA_TEXT 레코드(UTF-16LE)를 디코드 → `from` 부분 문자열 발견 시
+    /// `to`로 치환 → 재인코드. 같은 paragraph의 PARA_HEADER(앞에 위치) char_count도 갱신.
+    /// 텍스트박스 안 paragraph도 동일 레코드 시퀀스로 평탄 저장되므로 같은 패스에서 처리.
+    ///
+    /// 직렬화 source-of-truth는 paragraphs[0].controls의 SectionDef Box. section_def 미러도 갱신.
+    ///
+    /// 반환: `{ok, replaced: N}`
+    pub fn replace_text_in_master_pages_native(
+        &mut self,
+        section_idx: usize,
+        from: &str,
+        to: &str,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        use crate::parser::tags;
+        if from.is_empty() {
+            return Ok("{\"ok\":true,\"replaced\":0}".to_string());
+        }
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)",
+                section_idx,
+                self.document.sections.len()
+            )));
+        }
+
+        let mut replaced = 0usize;
+        let section = &mut self.document.sections[section_idx];
+
+        // helper: 레코드 슬라이스 안의 PARA_TEXT를 find-replace + 앞쪽 PARA_HEADER char_count 갱신.
+        fn apply_replace(records: &mut [crate::model::document::RawRecord], from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            // PARA_HEADER 인덱스 추적 (각 level별 가장 최근 본 것).
+            let mut last_header_idx_by_level: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+            for i in 0..records.len() {
+                let level = records[i].level;
+                let tag = records[i].tag_id;
+                if tag == tags::HWPTAG_PARA_HEADER {
+                    last_header_idx_by_level.insert(level, i);
+                    continue;
+                }
+                if tag != tags::HWPTAG_PARA_TEXT {
+                    continue;
+                }
+                // PARA_TEXT 데이터: UTF-16LE. 디코드.
+                let bytes = &records[i].data;
+                if bytes.len() % 2 != 0 {
+                    continue;
+                }
+                let utf16: Vec<u16> = (0..bytes.len() / 2)
+                    .map(|j| u16::from_le_bytes([bytes[j * 2], bytes[j * 2 + 1]]))
+                    .collect();
+                let text = match String::from_utf16(&utf16) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if !text.contains(from) {
+                    continue;
+                }
+                let new_text = text.replace(from, to);
+                // 재인코드.
+                let new_utf16: Vec<u16> = new_text.encode_utf16().collect();
+                let mut new_bytes = Vec::with_capacity(new_utf16.len() * 2);
+                for unit in &new_utf16 {
+                    new_bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                records[i].data = new_bytes;
+                count += 1;
+
+                // 같은 paragraph의 PARA_HEADER char_count 갱신.
+                // PARA_TEXT의 level은 PARA_HEADER level + 1. 후보 level은 level-1.
+                let header_level = level.saturating_sub(1);
+                if let Some(&hi) = last_header_idx_by_level.get(&header_level) {
+                    if records[hi].data.len() >= 4 {
+                        let new_count = new_utf16.len() as u32;
+                        let old_first4 = u32::from_le_bytes([
+                            records[hi].data[0],
+                            records[hi].data[1],
+                            records[hi].data[2],
+                            records[hi].data[3],
+                        ]);
+                        let msb_bit = old_first4 & 0x80000000;
+                        let updated = msb_bit | (new_count & 0x7FFFFFFF);
+                        let upd_bytes = updated.to_le_bytes();
+                        records[hi].data[0] = upd_bytes[0];
+                        records[hi].data[1] = upd_bytes[1];
+                        records[hi].data[2] = upd_bytes[2];
+                        records[hi].data[3] = upd_bytes[3];
+                    }
+                }
+            }
+            count
+        }
+
+        // 1) 직렬화 source-of-truth: paragraphs[0].controls의 SectionDef Box
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    replaced += apply_replace(&mut sd.extra_child_records, from, to);
+                }
+            }
+        }
+        // 2) section_def 미러
+        apply_replace(&mut section.section_def.extra_child_records, from, to);
+
+        // master_pages 파싱된 뷰는 렌더링 전용 — 동기화 생략 (export는 extra_child_records만 사용).
+
+        section.raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+        Ok(format!("{{\"ok\":true,\"replaced\":{}}}", replaced))
+    }
+
+    /// 구역의 바탕쪽(master page) 안 paragraph 텍스트를 모두 읽어 반환한다.
+    ///
+    /// JS 쪽에서 regex 등으로 패턴 매칭 → `replace_text_in_master_pages_native` 호출용.
+    /// 반환: JSON `{"ok":true,"texts":["...","..."]}`
+    pub fn get_master_pages_text_native(
+        &self,
+        section_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        use crate::parser::tags;
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)",
+                section_idx,
+                self.document.sections.len()
+            )));
+        }
+        let section = &self.document.sections[section_idx];
+        let mut texts: Vec<String> = Vec::new();
+        // 직렬화 source-of-truth와 동일한 위치에서 읽어 일관성 유지.
+        for para in section.paragraphs.iter() {
+            for ctrl in para.controls.iter() {
+                if let Control::SectionDef(sd) = ctrl {
+                    for rec in sd.extra_child_records.iter() {
+                        if rec.tag_id != tags::HWPTAG_PARA_TEXT {
+                            continue;
+                        }
+                        if rec.data.len() % 2 != 0 {
+                            continue;
+                        }
+                        let utf16: Vec<u16> = (0..rec.data.len() / 2)
+                            .map(|j| u16::from_le_bytes([rec.data[j * 2], rec.data[j * 2 + 1]]))
+                            .collect();
+                        if let Ok(s) = String::from_utf16(&utf16) {
+                            if !s.is_empty() {
+                                texts.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 강한 JSON escape: 모든 control char(0x00-0x1F) \uXXXX로. HWP paragraph text는
+        // 0x09(필드), 0x0F 등 다양한 컨트롤이 섞여 있어 기본 json_escape로는 부족.
+        fn json_escape_strong(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for c in s.chars() {
+                match c {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out
+        }
+        let joined = texts
+            .iter()
+            .map(|s| format!("\"{}\"", json_escape_strong(s)))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!("{{\"ok\":true,\"texts\":[{}]}}", joined))
+    }
+
+    /// 구역의 바탕쪽(master page)을 전부 제거한다.
+    ///
+    /// 베이스 HWP에 박힌 작품/회차 텍스트(예: "99억의여자 제 10 부")가 바탕쪽 텍스트박스에
+    /// 들어 있을 때, 출력에서 통째로 빠지도록 비운다.
+    ///
+    /// 직렬화기는 `paragraphs[0].controls`의 `Control::SectionDef(Box<SectionDef>)`를 통해
+    /// extra_child_records를 재기록하므로(serializer/control.rs:233), `section.section_def`만
+    /// 비우면 효과 없음. paragraph control 안의 SectionDef도 같이 비운다.
+    ///
+    /// 반환: `{ok, cleared: <removed count>}`
+    pub fn clear_master_pages_native(
+        &mut self,
+        section_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)", section_idx, self.document.sections.len()
+            )));
+        }
+        let section = &mut self.document.sections[section_idx];
+        let cleared = section.section_def.master_pages.len();
+        section.section_def.master_pages.clear();
+        section.section_def.extra_child_records.clear();
+        // 직렬화 경로의 실제 source-of-truth는 paragraph control 안의 SectionDef Box.
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    sd.master_pages.clear();
+                    sd.extra_child_records.clear();
+                }
+            }
+        }
+        section.raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+        Ok(format!("{{\"ok\":true,\"cleared\":{}}}", cleared))
+    }
 }
 
 #[cfg(test)]

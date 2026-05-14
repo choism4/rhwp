@@ -5,4 +5,5 @@ pub(crate) mod doc_tree_nav;
 pub(crate) mod field_query;
 mod form_query;
 mod search_query;
-mod bookmark_query;
+pub(crate) mod bookmark_query;
+mod page_numbering_query;

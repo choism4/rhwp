@@ -192,6 +192,8 @@ pub struct ResolvedParaStyle {
     pub keep_lines: bool,
     /// 문단 앞에서 항상 쪽 나눔 — attr1 bit 19
     pub page_break_before: bool,
+    /// 한 줄로 입력 (셀 폭 초과해도 줄바꿈 안 함) — attr2 bit 0-1 (1=on)
+    pub single_line: bool,
 }
 
 impl Default for ResolvedParaStyle {
@@ -219,6 +221,7 @@ impl Default for ResolvedParaStyle {
             keep_with_next: false,
             keep_lines: false,
             page_break_before: false,
+            single_line: false,
         }
     }
 }
@@ -679,6 +682,8 @@ fn resolve_single_para_style(ps: &ParaShape, tab_defs: &[TabDef], dpi: f64) -> R
         keep_with_next: (ps.attr1 >> 17) & 1 != 0 || (ps.attr2 >> 6) & 1 != 0,
         keep_lines: (ps.attr1 >> 18) & 1 != 0 || (ps.attr2 >> 7) & 1 != 0,
         page_break_before: (ps.attr1 >> 19) & 1 != 0 || (ps.attr2 >> 8) & 1 != 0,
+        // ParaShape attr2 bit 0-1: 0=일반, 1=한 줄로 입력, 2=여러 줄
+        single_line: (ps.attr2 & 0x03) == 1,
     }
 }
 
