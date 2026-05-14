@@ -1060,6 +1060,25 @@ impl DocumentCore {
         // 그래서 outer paragraphs + 모든 Shape 의 text_box.paragraphs 까지 재귀 sync.
         fn sync_paragraph(para: &mut crate::model::paragraph::Paragraph, from: &str, to: &str) -> usize {
             let mut count = 0usize;
+            // 자동번호(AutoNumber) 컨트롤이 있는 paragraph 는 text sync skip — 마커 위치 깨짐 방지.
+            // MBC/SBS baseline footer "...작품명..." 글상자에 자동번호(Page) inline 포함 케이스.
+            // text 치환 시 마커 character_offset 시프트되어 페이지번호 표시 안 됨.
+            let has_autonum = para.controls.iter().any(|c| matches!(c, Control::AutoNumber(_)));
+            if has_autonum {
+                // controls 안 Shape 글상자만 재귀 sync (outer paragraph 자체는 마커 보존)
+                for ctrl in para.controls.iter_mut() {
+                    if let Control::Shape(shape) = ctrl {
+                        if let Some(drawing) = shape.as_mut().drawing_mut() {
+                            if let Some(tb) = drawing.text_box.as_mut() {
+                                for inner_para in tb.paragraphs.iter_mut() {
+                                    count += sync_paragraph(inner_para, from, to);
+                                }
+                            }
+                        }
+                    }
+                }
+                return count;
+            }
             if para.text.contains(from) {
                 let new_text = para.text.replace(from, to);
                 let new_utf16: Vec<u16> = new_text.encode_utf16().collect();
