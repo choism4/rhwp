@@ -551,9 +551,12 @@ impl HeightMeasurer {
                             // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                             // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
                             // 측정/렌더링 일관성 (layout 의 recompose_for_cell_width 호출과 동일).
-                            crate::renderer::composer::recompose_for_cell_width(
-                                &mut comp, p, cell_inner_width, styles,
-                            );
+                            // 단, 셀의 "한 줄로 입력" 옵션이 켜져 있으면 split 하지 않는다.
+                            if !cell.one_line_input {
+                                crate::renderer::composer::recompose_for_cell_width(
+                                    &mut comp, p, cell_inner_width, styles,
+                                );
+                            }
                             let para_style = styles.para_styles.get(p.para_shape_id as usize);
                             let is_last_para = pidx + 1 == cell_para_count;
                             let spacing_before = if pidx > 0 {
@@ -734,9 +737,11 @@ impl HeightMeasurer {
                             let mut comp = compose_paragraph(p);
                             // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                             // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
-                            crate::renderer::composer::recompose_for_cell_width(
-                                &mut comp, p, cell_inner_width, styles,
-                            );
+                            if !cell.one_line_input {
+                                crate::renderer::composer::recompose_for_cell_width(
+                                    &mut comp, p, cell_inner_width, styles,
+                                );
+                            }
                             let para_style = styles.para_styles.get(p.para_shape_id as usize);
                             let is_last_para = pidx + 1 == cell_para_count;
                             let spacing_before = if pidx > 0 {

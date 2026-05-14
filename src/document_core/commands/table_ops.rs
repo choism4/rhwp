@@ -417,6 +417,16 @@ impl DocumentCore {
                 cell.list_header_width_ref &= !0x02;
             }
         }
+        // 한 줄로 입력 — list_attr bit 19. setCellProperties JSON 키 "oneLineInput".
+        if let Some(v) = json_bool(json, "oneLineInput") {
+            cell.one_line_input = v;
+            // 즉시 cell.paragraphs.line_segs 비워 compose_paragraph 단일 라인 강제.
+            if v {
+                for p in cell.paragraphs.iter_mut() {
+                    p.line_segs.clear();
+                }
+            }
+        }
 
         // BorderFill 변경: borderLeft 등이 포함된 경우 create_border_fill_from_json으로 처리
         let has_border = json.contains("\"borderLeft\"");

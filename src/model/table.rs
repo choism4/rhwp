@@ -112,6 +112,9 @@ pub struct Cell {
     pub apply_inner_margin: bool,
     /// 제목 셀 여부 (list_attr bit 18)
     pub is_header: bool,
+    /// 한 줄로 입력 (list_attr bit 19) — 한컴 "셀 속성 → 한 줄로 입력" 옵션.
+    /// true 면 셀 폭 초과해도 줄바꿈 안 함 (rhwp recompose_for_cell_width split 차단).
+    pub one_line_input: bool,
     /// LIST_HEADER 레코드의 34바이트 이후 추가 바이트 (라운드트립 보존용)
     pub raw_list_extra: Vec<u8>,
     /// 셀 필드 이름 (한컴 셀 속성 → 필드 → 필드 이름)
@@ -191,6 +194,7 @@ impl Cell {
             vertical_align: template.vertical_align,
             apply_inner_margin: template.apply_inner_margin,
             is_header: template.is_header,
+            one_line_input: template.one_line_input,
             raw_list_extra: template.raw_list_extra.clone(),
             field_name: None,
             paragraphs: vec![para],

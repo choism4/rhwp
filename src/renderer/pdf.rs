@@ -62,7 +62,9 @@ fn add_font_fallbacks(svg: &str) -> String {
            "font-family=\"-윤고딕130\"",
            "font-family=\"Noto Sans CJK KR,sans-serif\"",
        );
-    merge_ascii_text_runs(&with_fallbacks)
+    // DEBUG: merge_ascii_text_runs 임시 비활성화 — 페이지 번호 빈칸 회귀 원인 분리용.
+    // merge_ascii_text_runs(&with_fallbacks)
+    with_fallbacks
 }
 
 #[cfg(not(target_arch = "wasm32"))]
