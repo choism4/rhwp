@@ -1079,11 +1079,14 @@ impl DocumentCore {
                 count += 1;
             }
             // 안에 글상자가 있을 수 있음 — 재귀 sync.
+            // ShapeObject 는 enum, text_box 는 drawing(DrawingObjAttr) 안에 위치.
             for ctrl in para.controls.iter_mut() {
                 if let Control::Shape(shape) = ctrl {
-                    if let Some(tb) = shape.text_box.as_mut() {
-                        for inner_para in tb.paragraphs.iter_mut() {
-                            count += sync_paragraph(inner_para, from, to);
+                    if let Some(drawing) = shape.as_mut().drawing_mut() {
+                        if let Some(tb) = drawing.text_box.as_mut() {
+                            for inner_para in tb.paragraphs.iter_mut() {
+                                count += sync_paragraph(inner_para, from, to);
+                            }
                         }
                     }
                 }
