@@ -1221,7 +1221,17 @@ impl LayoutEngine {
                 raw_y
             }
         } else if depth == 0 {
+            // treat_as_char 표는 항상 vert_offset 적용. non-tac 표 중 어울림(Square) 등
+            // 비-floating wrap 도 vert_rel_to=Para + vertical_offset>0 이면 offset 을
+            // 반영한다. 그러지 않으면 "타이틀 텍스트 + 표"가 같은 문단에 있을 때 표가
+            // y_start(문단 시작)에 그려져 타이틀과 겹친다 (씬구성표 회귀). 한컴은 Square
+            // 표의 Para 기준 vert offset 을 반영하므로 동등 동작. vertical_offset 은 u32
+            // 라 음수 비트표현 방지를 위해 i32 캐스트 후 양수 비교.
             let v_offset = if table_treat_as_char {
+                hwpunit_to_px(table.common.vertical_offset as i32, self.dpi)
+            } else if matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                && (table.common.vertical_offset as i32) > 0
+            {
                 hwpunit_to_px(table.common.vertical_offset as i32, self.dpi)
             } else { 0.0 };
             if let Some(ref caption) = table.caption {

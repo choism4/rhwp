@@ -66,9 +66,16 @@ impl LayoutEngine {
         // 표 영역 침범. 비-Partial 경로(`table_layout.rs:1069+`)는 동일 분기에
         // `raw_y.max(y_start)` 클램프가 있어 음수 무력화. Partial 경로에는
         // 클램프가 없으므로 게이트를 signed 비교로 정정해 동등 효과.
+        // 어울림(Square) wrap 도 포함: 타이틀 텍스트 + 표가 같은 문단일 때 표가
+        // y_start(문단 시작)에 그려져 타이틀과 겹치는 회귀 차단. 비-Partial 경로
+        // (table_layout.rs:1223 else-if 분기)와 동일 정책. TopAndBottom 만 허용하면
+        // 페이지 분할되는 큰 씬구성표(MBC 등)에서 vert offset 누락 → 겹침.
         let vert_off_signed = table.common.vertical_offset as i32;
         let y_start = if !is_continuation && !table.common.treat_as_char
-            && matches!(table.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+            && matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom | crate::model::shape::TextWrap::Square
+            )
             && matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
             && vert_off_signed > 0
         {
