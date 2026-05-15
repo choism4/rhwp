@@ -1321,15 +1321,26 @@ impl LayoutEngine {
                 if let Some(fmt_byte) = page_auto_format {
                     let page_str = format_number(current_pn as u16, NumFmt::from_hwp_format(fmt_byte));
                     if let Some(comp) = composed_paras.get_mut(pi) {
-                        for line in &mut comp.lines {
+                        // 2026-05-15 E-8 fix: page number 는 paragraph 당 1번만 삽입.
+                        // 기존엔 run.text.trim().is_empty() 가 빈 문자열("") trailing run 에도
+                        // 매치되어, marker+작품명 통합 footer(MBC/SBS)에서 작품명 끝 빈 run 에
+                        // page_str 가 또 채워짐 → "...제 1 부 1 0" 잔존.
+                        // → 빈 문자열 run 제외(공백만 있는 실제 marker placeholder 만) + done flag.
+                        let mut done = false;
+                        'apply: for line in &mut comp.lines {
                             for run in &mut line.runs {
                                 if run.text.contains('\u{0015}') {
                                     run.text = run.text.replace('\u{0015}', &page_str);
-                                } else if run.text.trim().is_empty() {
+                                    done = true;
+                                    break 'apply;
+                                } else if !run.text.is_empty() && run.text.trim().is_empty() {
                                     run.text = page_str.clone();
+                                    done = true;
+                                    break 'apply;
                                 }
                             }
                         }
+                        let _ = done;
                     }
                 }
             }
