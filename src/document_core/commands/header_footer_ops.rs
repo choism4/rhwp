@@ -983,15 +983,16 @@ impl DocumentCore {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                // 2026-05-15 E-1 fix: AutoNumber inline 컨트롤(0x0012) 등 16-byte extended
-                // control 이 있는 raw PARA_TEXT record 는 단순 UTF-16 디코드/replace/재인코드 시
-                // control 의 16-byte 구조가 8개 garbage char 로 디코드되어 깨짐 → 페이지번호
-                // 마커 소실. control 포함 record 는 raw replace skip (master_pages model sync
-                // 의 has_autonum 가드와 동일 정책).
-                if text.chars().any(|c| {
-                    let n = c as u32;
-                    n == 0x0012 || (0x0001..=0x000F).contains(&n)
-                }) {
+                // 2026-05-15 E-1 fix: AutoNumber inline 컨트롤(0x0012)은 16-byte extended
+                // control 이라 단순 UTF-16 디코드/replace/재인코드 시 16-byte 구조가 8개
+                // garbage char 로 디코드되어 깨짐 → 페이지번호 마커 소실. 0x0012 포함
+                // record 는 raw replace skip.
+                //
+                // 2026-05-15 D-7 fix: skip 범위는 0x0012 만. 이전엔 0x0001~0x000F 까지
+                // 포함했으나, marker 없는 footer 작품명 record 도 필드/charshape control
+                // (0x01~0x0F)을 포함할 수 있어 작품명·회차 치환이 통째로 차단됐다
+                // (저스티스 footer 가 baseline 회차 "제 7 부" 그대로 노출).
+                if text.contains('\u{0012}') {
                     continue;
                 }
                 if !text.contains(from) {
