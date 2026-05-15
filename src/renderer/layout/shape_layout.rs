@@ -1321,12 +1321,49 @@ impl LayoutEngine {
                 if let Some(fmt_byte) = page_auto_format {
                     let page_str = format_number(current_pn as u16, NumFmt::from_hwp_format(fmt_byte));
                     if let Some(comp) = composed_paras.get_mut(pi) {
+                        let mut replaced = false;
                         for line in &mut comp.lines {
                             for run in &mut line.runs {
                                 if run.text.contains('\u{0015}') {
                                     run.text = run.text.replace('\u{0015}', &page_str);
+                                    replaced = true;
                                 } else if run.text.trim().is_empty() {
                                     run.text = page_str.clone();
+                                    replaced = true;
+                                }
+                            }
+                        }
+                        // 2026-05-15 E cycle fix: baseline 의 marker placeholder 가
+                        // body_text.rs:319 에서 0x0012 → ' ' (single space) 로 저장됨.
+                        // KBS 는 marker Shape 단독이라 위 trim().is_empty() 분기 매치 (text 가 "-   -" 5 chars 의 trim 결과는 "-   -" 가 아닌 dash 사이 공백만이라 사실 trim 효과 없음).
+                        // 실제로 marker placeholder ' ' 자리 = paragraph.text 안 chars[1] (대시 직후).
+                        // MBC/SBS 는 marker + 작품명 통합이라 run.text 가 "- " (chars=0..2) 식으로 분리 → 위 분기 모두 매치 안 됨.
+                        // 따라서 page_str 미삽입 → marker 안 보임. 여기서 chars[1] 위치 inline replace 추가.
+                        if !replaced && !page_str.is_empty() {
+                            let chars_count = para.text.chars().count();
+                            let marker_idx_opt: Option<usize> = if chars_count >= 2 && para.text.chars().nth(1) == Some(' ') {
+                                Some(1)
+                            } else { None };
+                            if let Some(marker_char_idx) = marker_idx_opt {
+                                let mut acc_chars = 0usize;
+                                'find: for line in &mut comp.lines {
+                                    for run in &mut line.runs {
+                                        let run_chars = run.text.chars().count();
+                                        if acc_chars + run_chars > marker_char_idx {
+                                            let local = marker_char_idx - acc_chars;
+                                            let local_byte = run.text.char_indices().nth(local).map(|(i,_)| i);
+                                            let next_byte = run.text.char_indices().nth(local + 1).map(|(i,_)| i)
+                                                .unwrap_or(run.text.len());
+                                            if let Some(lb) = local_byte {
+                                                if run.text.is_char_boundary(lb) && run.text.is_char_boundary(next_byte) {
+                                                    run.text = format!("{}{}{}",
+                                                        &run.text[..lb], page_str, &run.text[next_byte..]);
+                                                    break 'find;
+                                                }
+                                            }
+                                        }
+                                        acc_chars += run_chars;
+                                    }
                                 }
                             }
                         }
