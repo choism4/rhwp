@@ -1058,6 +1058,47 @@ impl DocumentCore {
         //
         // footer 텍스트는 보통 outer paragraph 가 아니라 그 안의 Shape(글상자) -> TextBox.paragraphs[i].text 에 있음.
         // 그래서 outer paragraphs + 모든 Shape 의 text_box.paragraphs 까지 재귀 sync.
+        // 재귀: paragraph 안 모든 control 의 nested paragraphs (Footer/Header/Table cells/Shape text_box).
+        // page_numbering_query.rs:update_paragraph 패턴과 동일.
+        fn sync_nested_in_controls(
+            para: &mut crate::model::paragraph::Paragraph,
+            from: &str,
+            to: &str,
+        ) -> usize {
+            let mut count = 0usize;
+            for ctrl in para.controls.iter_mut() {
+                match ctrl {
+                    Control::Footer(f) => {
+                        for p in f.paragraphs.iter_mut() {
+                            count += sync_paragraph(p, from, to);
+                        }
+                    }
+                    Control::Header(h) => {
+                        for p in h.paragraphs.iter_mut() {
+                            count += sync_paragraph(p, from, to);
+                        }
+                    }
+                    Control::Table(t) => {
+                        for cell in t.cells.iter_mut() {
+                            for p in cell.paragraphs.iter_mut() {
+                                count += sync_paragraph(p, from, to);
+                            }
+                        }
+                    }
+                    Control::Shape(shape) => {
+                        if let Some(drawing) = shape.as_mut().drawing_mut() {
+                            if let Some(tb) = drawing.text_box.as_mut() {
+                                for inner_para in tb.paragraphs.iter_mut() {
+                                    count += sync_paragraph(inner_para, from, to);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
         fn sync_paragraph(para: &mut crate::model::paragraph::Paragraph, from: &str, to: &str) -> usize {
             let mut count = 0usize;
             // 자동번호(AutoNumber) 컨트롤이 있는 paragraph 는 text sync skip — 마커 위치 깨짐 방지.
@@ -1065,26 +1106,13 @@ impl DocumentCore {
             // text 치환 시 마커 character_offset 시프트되어 페이지번호 표시 안 됨.
             let has_autonum = para.controls.iter().any(|c| matches!(c, Control::AutoNumber(_)));
             if has_autonum {
-                // controls 안 Shape 글상자만 재귀 sync (outer paragraph 자체는 마커 보존)
-                let mut inner_count = 0usize;
-                for ctrl in para.controls.iter_mut() {
-                    if let Control::Shape(shape) = ctrl {
-                        if let Some(drawing) = shape.as_mut().drawing_mut() {
-                            if let Some(tb) = drawing.text_box.as_mut() {
-                                for inner_para in tb.paragraphs.iter_mut() {
-                                    inner_count += sync_paragraph(inner_para, from, to);
-                                }
-                            }
-                        }
-                    }
-                }
+                // controls 안 nested paragraphs 만 재귀 sync (outer paragraph 자체는 마커 보존)
+                let inner_count = sync_nested_in_controls(para, from, to);
                 // Shape inner text 변경 시 outer paragraph 의 line_segs 캐시 invalidate.
-                // 미수행 시 renderer 가 stale 한 라인 레이아웃을 재사용하여 AutoNumber 마커 시각 위치 drift.
                 if inner_count > 0 {
                     para.line_segs.clear();
                 }
-                count += inner_count;
-                return count;
+                return inner_count;
             }
             if para.text.contains(from) {
                 let new_text = para.text.replace(from, to);
@@ -1104,19 +1132,8 @@ impl DocumentCore {
                 para.line_segs.clear();
                 count += 1;
             }
-            // 안에 글상자가 있을 수 있음 — 재귀 sync.
-            // ShapeObject 는 enum, text_box 는 drawing(DrawingObjAttr) 안에 위치.
-            for ctrl in para.controls.iter_mut() {
-                if let Control::Shape(shape) = ctrl {
-                    if let Some(drawing) = shape.as_mut().drawing_mut() {
-                        if let Some(tb) = drawing.text_box.as_mut() {
-                            for inner_para in tb.paragraphs.iter_mut() {
-                                count += sync_paragraph(inner_para, from, to);
-                            }
-                        }
-                    }
-                }
-            }
+            // 안에 Footer/Header/Table cells/Shape 글상자 nested paragraphs 재귀 sync.
+            count += sync_nested_in_controls(para, from, to);
             count
         }
         fn sync_master(masters: &mut [crate::model::header_footer::MasterPage], from: &str, to: &str) -> usize {
