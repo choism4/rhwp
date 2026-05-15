@@ -1086,15 +1086,27 @@ impl DocumentCore {
                         }
                     }
                     Control::Shape(shape) => {
-                        if let Some(drawing) = shape.as_mut().drawing_mut() {
-                            if let Some(tb) = drawing.text_box.as_mut() {
-                                for inner_para in tb.paragraphs.iter_mut() {
-                                    count += sync_paragraph(inner_para, from, to);
-                                }
-                            }
-                        }
+                        count += sync_shape_object(shape.as_mut(), from, to);
                     }
                     _ => {}
+                }
+            }
+            count
+        }
+        fn sync_shape_object(obj: &mut crate::model::shape::ShapeObject, from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            if let Some(drawing) = obj.drawing_mut() {
+                if let Some(tb) = drawing.text_box.as_mut() {
+                    for inner_para in tb.paragraphs.iter_mut() {
+                        count += sync_paragraph(inner_para, from, to);
+                    }
+                }
+            }
+            // ShapeObject::Group 의 children 재귀 — 묶음 도형 안 paragraph 들 sync.
+            // D-8 회귀: master_pages 잔존 "어빠 르" 같은 partial 텍스트 = Group children 안 paragraph 누락.
+            if let crate::model::shape::ShapeObject::Group(g) = obj {
+                for child in g.children.iter_mut() {
+                    count += sync_shape_object(child, from, to);
                 }
             }
             count

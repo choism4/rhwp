@@ -36,6 +36,18 @@ fn main() {
             sim_to: "으라차차 와이키키 제 1 회",
         },
     ];
+    // E cycle: 우리 pipeline 변환 결과 edited.hwp 직접 검사
+    println!("\n########## 변환 결과 edited.hwp 검사 ##########");
+    if let Ok(data) = fs::read("/tmp/mbc-edited.hwp") {
+        if let Ok(core) = rhwp::document_core::DocumentCore::from_bytes(&data) {
+            dump_section("MBC-EDITED", "EDITED", core.document(), 1);
+        } else {
+            println!("edited.hwp parse fail");
+        }
+    } else {
+        println!("/tmp/mbc-edited.hwp not found");
+    }
+
     for case in &cases {
         let Case { label, path, sim_from, sim_to } = case;
         println!("\n========== {} {} ==========", label, path);
@@ -58,6 +70,19 @@ fn main() {
 
         println!("\n>>> AFTER replace_text_in_master_pages_native <<<");
         dump_section(label, "AFTER", core.document(), 1);
+
+        // round-trip 검증: export_hwp → re-parse → footer 확인
+        println!("\n>>> ROUND-TRIP: export_hwp_native → re-parse <<<");
+        match core.export_hwp_native() {
+            Ok(bytes) => {
+                println!("export_hwp_native -> {} bytes", bytes.len());
+                match rhwp::document_core::DocumentCore::from_bytes(&bytes) {
+                    Ok(rc) => dump_section(label, "ROUNDTRIP", rc.document(), 1),
+                    Err(e) => println!("re-parse fail: {}", e),
+                }
+            }
+            Err(e) => println!("export_hwp_native fail: {:?}", e),
+        }
     }
 }
 
@@ -93,6 +118,12 @@ fn dump_para_recursive(label: &str, path: &str, para: &Paragraph, depth: usize) 
             .map(|cs| format!("(start={},id={})", cs.start_pos, cs.char_shape_id))
             .collect();
         println!("{}    char_shapes: [{}] count={}", indent, cs_segs.join(", "), para.char_shapes.len());
+        // line_segs dump — wrap 여부 + vertical_pos 확인
+        let ls_segs: Vec<String> = para.line_segs.iter()
+            .map(|ls| format!("(text_start={},vpos={},lh={},seg_w={})", ls.text_start, ls.vertical_pos, ls.line_height, ls.segment_width))
+            .collect();
+        println!("{}    line_segs: [{}] count={}", indent, ls_segs.join(", "), para.line_segs.len());
+        println!("{}    char_count={} char_offsets.len={}", indent, para.char_count, para.char_offsets.len());
         // run boundary 시뮬레이션: 같은 char_shape_id 의 인접 구간을 grouping
         if para.char_shapes.len() > 1 {
             let chars: Vec<char> = para.text.chars().collect();
@@ -123,6 +154,9 @@ fn dump_para_recursive(label: &str, path: &str, para: &Paragraph, depth: usize) 
         println!("{}  ctrl[{}]: {}", indent, ci, cname);
         match ctrl {
             Control::Shape(shape) => {
+                let w = shape.as_ref().common().width;
+                let h = shape.as_ref().common().height;
+                println!("{}    shape common: width={} height={} hwpunit", "  ".repeat(depth), w, h);
                 dump_shape_object_recursive(label, &format!("{}.shape[{}]", path, ci), shape.as_ref(), depth + 2);
             }
             Control::Footer(f) => {
