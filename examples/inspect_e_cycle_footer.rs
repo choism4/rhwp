@@ -35,6 +35,12 @@ fn main() {
             sim_from: "-   -               으라차차 와이키키  제 1 회",
             sim_to: "으라차차 와이키키 제 1 회",
         },
+        Case {
+            label: "JUSTICE",
+            path: "../전달용_원문 및 편집틀 V2/KBS/편집본/저스티스 편집완료 1부(편집본).hwp",
+            sim_from: "저스티스  제 1 부",
+            sim_to: "저스티스 제 1 부",
+        },
     ];
     // E cycle: 우리 pipeline 변환 결과 edited.hwp 직접 검사
     println!("\n########## 변환 결과 edited.hwp 검사 ##########");
