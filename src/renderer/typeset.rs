@@ -2120,7 +2120,17 @@ impl TypesetEngine {
                         // (2022 국립국어원 p31 row 8 케이스). 임계값 25 px 는
                         // synam-001 의 정합 분할 (27.3 px) 과 본 결함 (17.6 px) 사이.
                         const MIN_TOP_KEEP_PX: f64 = 25.0;
-                        if avail_content_for_r >= MIN_SPLIT_CONTENT_PX
+                        if remaining_content <= 0.0
+                            && avail_content_for_r >= MIN_SPLIT_CONTENT_PX
+                        {
+                            // 행 콘텐츠 전체가 잔여 공간에 들어감. find_break_row 가
+                            // row_heights 과대추정으로 행을 제외했으나 실측 content 는
+                            // fit — 통째 포함한다. split_end_limit 에 정밀 content 높이를
+                            // 넣어 partial_height 가 row_heights 과대분 대신 정밀값을
+                            // 쓰게 해 페이지 overflow 를 막는다 (페이지 끝 공백 회귀 차단).
+                            end_row = r + 1;
+                            split_end_limit = total_content.max(MIN_SPLIT_CONTENT_PX);
+                        } else if avail_content_for_r >= MIN_SPLIT_CONTENT_PX
                             && avail_content_for_r >= min_first_line
                             && avail_content_for_r >= MIN_TOP_KEEP_PX
                             && remaining_content >= MIN_SPLIT_CONTENT_PX
