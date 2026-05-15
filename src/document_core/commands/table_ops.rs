@@ -373,6 +373,67 @@ impl DocumentCore {
         ))
     }
 
+    /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
+    ///
+    /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`
+    /// set_cell_properties_native 는 호출마다 recompose_section + paginate_if_needed 를
+    /// 수행 — 큰 baseline 씬구성표(96셀)에서 셀당 호출 시 비선형으로 stuck.
+    /// 본 배치는 모든 셀 속성을 적용한 뒤 recompose/paginate 를 한 번만 수행한다.
+    /// 테두리(borderLeft 등) 변경은 미지원 — 단순 속성 전용.
+    /// 반환: JSON `{"ok":true,"applied":N}`
+    pub(crate) fn set_multiple_cells_properties_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        json: &str,
+    ) -> Result<String, HwpError> {
+        let trimmed = json.trim();
+        if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+            return Err(HwpError::RenderError("잘못된 JSON 배열 형식".to_string()));
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        // 각 {} 객체 추출 — resize_table_cells_native 와 동일 패턴.
+        let mut entries: Vec<(usize, String)> = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '{' => {
+                    if depth == 0 {
+                        start = i;
+                    }
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let obj = &inner[start..=i];
+                        let cell_idx = Self::parse_json_i32(obj, "cellIdx").unwrap_or(-1);
+                        if cell_idx >= 0 {
+                            entries.push((cell_idx as usize, obj.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let mut applied = 0usize;
+        for (cell_idx, obj) in &entries {
+            if apply_simple_cell_props(table, *cell_idx, obj) {
+                applied += 1;
+            }
+        }
+
+        self.document.sections[section_idx].raw_stream = None;
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+
+        Ok(format!("{{\"ok\":true,\"applied\":{}}}", applied))
+    }
+
     /// 셀 속성을 수정한다 (네이티브).
     pub(crate) fn set_cell_properties_native(
         &mut self,
@@ -1407,4 +1468,70 @@ fn json_escape(s: &str) -> String {
     }
     r.push('"');
     r
+}
+
+/// 단일 셀에 단순 속성(테두리 제외)을 적용한다 — set_multiple_cells_properties_native 배치용.
+/// set_cell_properties_native 의 속성 적용 로직과 동일하되 recompose/paginate 와 테두리
+/// 처리를 제외한다 (배치 호출자가 마지막에 한 번만 recompose).
+fn apply_simple_cell_props(
+    table: &mut crate::model::table::Table,
+    cell_idx: usize,
+    json: &str,
+) -> bool {
+    use crate::document_core::helpers::{json_bool, json_i16, json_u32, json_u8};
+    let Some(cell) = table.cells.get_mut(cell_idx) else {
+        return false;
+    };
+    if let Some(v) = json_u32(json, "width") {
+        cell.width = v;
+    }
+    if let Some(v) = json_u32(json, "height") {
+        cell.height = v;
+    }
+    if let Some(v) = json_i16(json, "paddingLeft") {
+        cell.padding.left = v;
+    }
+    if let Some(v) = json_i16(json, "paddingRight") {
+        cell.padding.right = v;
+    }
+    if let Some(v) = json_i16(json, "paddingTop") {
+        cell.padding.top = v;
+    }
+    if let Some(v) = json_i16(json, "paddingBottom") {
+        cell.padding.bottom = v;
+    }
+    if let Some(v) = json_u8(json, "verticalAlign") {
+        cell.vertical_align = match v {
+            1 => crate::model::table::VerticalAlign::Center,
+            2 => crate::model::table::VerticalAlign::Bottom,
+            _ => crate::model::table::VerticalAlign::Top,
+        };
+    }
+    if let Some(v) = json_u8(json, "textDirection") {
+        cell.text_direction = v;
+    }
+    if let Some(v) = json_bool(json, "isHeader") {
+        cell.is_header = v;
+        if v {
+            cell.list_header_width_ref |= 0x04;
+        } else {
+            cell.list_header_width_ref &= !0x04;
+        }
+    }
+    if let Some(v) = json_bool(json, "cellProtect") {
+        if v {
+            cell.list_header_width_ref |= 0x02;
+        } else {
+            cell.list_header_width_ref &= !0x02;
+        }
+    }
+    if let Some(v) = json_bool(json, "oneLineInput") {
+        cell.one_line_input = v;
+        if v {
+            for p in cell.paragraphs.iter_mut() {
+                p.line_segs.clear();
+            }
+        }
+    }
+    true
 }

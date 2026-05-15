@@ -1913,6 +1913,29 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
+    ///
+    /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`
+    /// setCellProperties 는 호출마다 recompose+paginate → 큰 baseline 씬구성표(96셀)
+    /// 에서 셀당 호출 시 비선형 stuck. 본 배치는 recompose/paginate 를 1회만 수행.
+    /// 반환: JSON `{"ok":true,"applied":N}`
+    #[wasm_bindgen(js_name = setMultipleCellsProperties)]
+    pub fn set_multiple_cells_properties(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        json: &str,
+    ) -> Result<String, JsValue> {
+        self.set_multiple_cells_properties_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            json,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 여러 셀의 width/height를 한 번에 조절한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
