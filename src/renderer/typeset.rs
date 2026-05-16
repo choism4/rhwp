@@ -2046,6 +2046,10 @@ impl TypesetEngine {
                 let approx_end_raw = mt.find_break_row(avail_for_rows, cursor_row, effective_first_row_h);
                 // Task #398: rowspan 묶음 중간에서 잘리지 않도록 블록 경계로 스냅
                 let approx_end = mt.snap_to_block_boundary(approx_end_raw);
+                if row_count <= 60 {
+                    eprintln!("[SLT] rc={} cursor={} cont={} page_avail={:.1} avail_for_rows={:.1} hdr_oh={:.1} eff_first={:.1} approx_raw={} approx={}",
+                        row_count, cursor_row, is_continuation, page_avail, avail_for_rows, header_overhead, effective_first_row_h, approx_end_raw, approx_end);
+                }
 
                 let (cur_b_start, cur_b_end, _) = mt.row_block_for(cursor_row);
                 let cur_block_size = cur_b_end.saturating_sub(cur_b_start);
@@ -2178,6 +2182,11 @@ impl TypesetEngine {
                 }
             };
 
+            if row_count <= 60 {
+                eprintln!("[SLT] => end_row={} split_end_limit={:.1} partial_h={:.1}", end_row, split_end_limit, partial_height);
+                eprintln!("[SLT]    row_heights={:?}", mt.row_heights.iter().map(|h| (h * 10.0).round() / 10.0).collect::<Vec<_>>());
+                eprintln!("[SLT]    cumulative={:?}", mt.cumulative_heights.iter().map(|h| (h * 10.0).round() / 10.0).collect::<Vec<_>>());
+            }
             let actual_split_start = content_offset;
             let actual_split_end = split_end_limit;
 
