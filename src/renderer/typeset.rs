@@ -1935,6 +1935,26 @@ impl TypesetEngine {
         let base_available = st.base_available_height();
         let table_available = available; // 각주/존 오프셋 차감된 가용 높이
 
+        // host 문단 pre-text(표 위 텍스트 — 예: "1회 씬 구성표" 타이틀) 높이.
+        // place_table_with_text 의 pre_height 와 동일 공식. fits 경로는 pre_height 를
+        // current_height 에 더하지만 분할 경로는 미반영했다 → 표 행이 pre-text 영역을
+        // 침범해 페이지 하단에서 클립. 첫 fragment 의 가용 높이에서 차감한다.
+        let host_pre_height: f64 = {
+            let voff = Self::get_table_vertical_offset(table);
+            let pre_end = if voff > 0 && !para.text.is_empty() {
+                fmt.line_heights.len()
+            } else {
+                0
+            };
+            let is_first_table = !para.controls.iter().take(ctrl_idx)
+                .any(|c| matches!(c, Control::Table(_)));
+            if pre_end > 0 && is_first_table {
+                fmt.line_advances_sum(0..pre_end)
+            } else {
+                0.0
+            }
+        };
+
         // 첫 행이 남은 공간보다 크면 다음 페이지로 (인트라-로우 분할 가능성 확인).
         // Task #398: rowspan>1 셀이 행 0의 시작점이면 블록 전체 높이로 판정.
         let remaining_on_page = (table_available - st.current_height).max(0.0);
@@ -2020,7 +2040,7 @@ impl TypesetEngine {
             let page_avail = if is_continuation {
                 base_available
             } else {
-                (table_available - st.current_height - caption_extra).max(0.0)
+                (table_available - st.current_height - caption_extra - host_pre_height).max(0.0)
             };
 
             let header_overhead = if is_continuation && mt.repeat_header && mt.has_header_cells && row_count > 1 {
@@ -2046,10 +2066,6 @@ impl TypesetEngine {
                 let approx_end_raw = mt.find_break_row(avail_for_rows, cursor_row, effective_first_row_h);
                 // Task #398: rowspan 묶음 중간에서 잘리지 않도록 블록 경계로 스냅
                 let approx_end = mt.snap_to_block_boundary(approx_end_raw);
-                if row_count <= 60 {
-                    eprintln!("[SLT] rc={} cursor={} cont={} page_avail={:.1} avail_for_rows={:.1} hdr_oh={:.1} eff_first={:.1} approx_raw={} approx={}",
-                        row_count, cursor_row, is_continuation, page_avail, avail_for_rows, header_overhead, effective_first_row_h, approx_end_raw, approx_end);
-                }
 
                 let (cur_b_start, cur_b_end, _) = mt.row_block_for(cursor_row);
                 let cur_block_size = cur_b_end.saturating_sub(cur_b_start);
@@ -2182,11 +2198,6 @@ impl TypesetEngine {
                 }
             };
 
-            if row_count <= 60 {
-                eprintln!("[SLT] => end_row={} split_end_limit={:.1} partial_h={:.1}", end_row, split_end_limit, partial_height);
-                eprintln!("[SLT]    row_heights={:?}", mt.row_heights.iter().map(|h| (h * 10.0).round() / 10.0).collect::<Vec<_>>());
-                eprintln!("[SLT]    cumulative={:?}", mt.cumulative_heights.iter().map(|h| (h * 10.0).round() / 10.0).collect::<Vec<_>>());
-            }
             let actual_split_start = content_offset;
             let actual_split_end = split_end_limit;
 
