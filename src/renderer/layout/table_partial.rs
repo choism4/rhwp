@@ -16,6 +16,7 @@ use super::border_rendering::{build_row_col_x, collect_cell_borders, render_edge
 use super::text_measurement::{resolved_to_text_style, estimate_text_width};
 use super::table_layout::{NestedTableSplit, calc_nested_split_rows};
 use super::super::height_measurer::MeasuredTable;
+use super::paragraph_layout::line_range_dump_enabled;
 
 // 표 수평 정렬 보조 타입은 table_layout.rs에 통합됨
 
@@ -66,9 +67,16 @@ impl LayoutEngine {
         // 표 영역 침범. 비-Partial 경로(`table_layout.rs:1069+`)는 동일 분기에
         // `raw_y.max(y_start)` 클램프가 있어 음수 무력화. Partial 경로에는
         // 클램프가 없으므로 게이트를 signed 비교로 정정해 동등 효과.
+        // 어울림(Square) wrap 도 포함: 타이틀 텍스트 + 표가 같은 문단일 때 표가
+        // y_start(문단 시작)에 그려져 타이틀과 겹치는 회귀 차단. 비-Partial 경로
+        // (table_layout.rs:1223 else-if 분기)와 동일 정책. TopAndBottom 만 허용하면
+        // 페이지 분할되는 큰 씬구성표(MBC 등)에서 vert offset 누락 → 겹침.
         let vert_off_signed = table.common.vertical_offset as i32;
         let y_start = if !is_continuation && !table.common.treat_as_char
-            && matches!(table.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+            && matches!(
+                table.common.text_wrap,
+                crate::model::shape::TextWrap::TopAndBottom | crate::model::shape::TextWrap::Square
+            )
             && matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
             && vert_off_signed > 0
         {
@@ -340,6 +348,73 @@ impl LayoutEngine {
             let is_split_end_row = split_end_content_limit > 0.0 && cell_row == end_row.saturating_sub(1);
             let is_in_split_row = is_split_start_row || is_split_end_row;
 
+            // [task_dup_render] row_span 으로 행 경계에서 페이지를 걸치는 셀.
+            // cell_row 가 이번 fragment 의 body 시작(start_row)보다 앞이면, 셀 콘텐츠는
+            // 이전 fragment 에서 이미 렌더됐다 (콘텐츠는 셀 상단 = 첫 행에 놓임).
+            // is_split_*_row 는 typeset 의 intra-row 분할에서만 set 되므로 이 케이스를
+            // 포착 못 해 line_ranges=None → 연속 두 페이지에 셀 텍스트 전체 중복 출력.
+            // 이전 fragment 가 점유한 행들의 높이 합을 content_offset 으로 환산해
+            // compute_cell_line_ranges 가 이미 렌더된 줄을 skip 하게 한다 (= fragment A
+            // 의 cell_h 와 동일 합산식 → 콘텐츠가 넘치면 정확히 이어서 렌더).
+            // 제목행 반복(is_repeated_header_cell)은 의도된 재출력이므로 제외.
+            // [task_dup_render] row_span 으로 페이지 경계를 가로지르는 셀의 줄 범위 산정.
+            //   straddle 셀은 is_split_*_row(셀이 분할 행 자체일 때만 set) 에 안 잡혀
+            //   line_ranges=None → 인접 fragment 양쪽에 전체 렌더 → 셀 텍스트 중복.
+            //
+            // 두 fragment 가 같은 경계를 보도록 "boundary" 를 양쪽에서 동일 공식으로 산정:
+            //   boundary(분할행 S, S 안 offset O)
+            //     = (cell_row..S 의 셀 행 높이 합, 내부 cell_spacing 포함) + O
+            //   - 인접 fragment A(앞)·B(뒤)에서 A 의 분할행(end_row-1) == B 의 분할행
+            //     (start_row), A 의 split_end_content_limit == B 의 split_start_content_offset
+            //     (typeset 계약) → boundary 가 양쪽에서 동일 → content_limit(A)==content_offset(B).
+            // clean 행 경계(intra-row 분할 없음)면 S 는 경계 행, O=0.
+            let sum_cell_rows_before = |limit_row: usize| -> f64 {
+                let mut h = 0.0;
+                let mut cnt = 0;
+                for rs in 0..cell.row_span as usize {
+                    let tr = cell_row + rs;
+                    if tr < limit_row {
+                        if cnt > 0 { h += cell_spacing; }
+                        h += row_heights.get(tr).copied().unwrap_or(0.0);
+                        cnt += 1;
+                    }
+                }
+                h
+            };
+
+            // straddle-in: 셀이 이번 fragment 시작(start_row) 이전 행부터 이어짐.
+            let straddle_offset: f64 = if cell_row < start_row && !is_repeated_header_cell {
+                sum_cell_rows_before(start_row) + split_start_content_offset
+            } else {
+                0.0
+            };
+            let has_straddle = straddle_offset > 0.0;
+
+            // straddle-out: 셀이 이번 fragment 이후로 이어짐.
+            //   (a) cell_end_row > frag_end — 다음 행들로 이어짐, 또는
+            //   (b) cell_end_row == frag_end 이고 마지막 행(end_row-1)이 intra-row 분할
+            //       (split_end_content_limit>0) — 그 행의 아래 일부가 다음 페이지로.
+            let frag_end = end_row.min(row_count);
+            let cell_end_clamped = cell_end_row.min(row_count);
+            let straddle_continues = !is_repeated_header_cell
+                && !is_split_end_row
+                && (cell_end_clamped > frag_end
+                    || (cell_end_clamped == frag_end && split_end_content_limit > 0.0));
+            let straddle_limit: f64 = if straddle_continues {
+                // boundary = A 가 보여줄 셀 콘텐츠의 절대 끝 위치.
+                let boundary = if split_end_content_limit > 0.0 {
+                    sum_cell_rows_before(end_row.saturating_sub(1)) + split_end_content_limit
+                } else {
+                    cell_h // clean 행 경계 — A 의 모든 셀 행
+                };
+                // content_limit = boundary - 이번 fragment 가 이미 건너뛴 분량(straddle_offset).
+                // compute_cell_line_ranges: abs_limit = content_offset + content_limit = boundary.
+                (boundary - straddle_offset).max(0.0)
+            } else {
+                0.0
+            };
+            let has_straddle_limit = straddle_limit > 0.0;
+
             let cell_id = tree.next_id();
             let mut cell_node = RenderNode::new(
                 cell_id,
@@ -350,7 +425,7 @@ impl LayoutEngine {
                     row_span: cell.row_span,
                     border_fill_id: cell.border_fill_id,
                     text_direction: cell.text_direction,
-                    clip: is_in_split_row,
+                    clip: is_in_split_row || has_straddle || has_straddle_limit,
                     model_cell_index: Some(cell_idx as u32),
                 }),
                 BoundingBox::new(cell_x, cell_y, cell_w, cell_h),
@@ -397,10 +472,25 @@ impl LayoutEngine {
             }
 
 
-            // 분할 행: compute_cell_line_ranges()로 표시할 줄 범위 계산
-            let line_ranges: Option<Vec<(usize, usize)>> = if is_in_split_row {
-                let co = if is_split_start_row { split_start_content_offset } else { 0.0 };
-                let cl = if is_split_end_row { split_end_content_limit } else { 0.0 };
+            // 분할 행 / row_span straddle: compute_cell_line_ranges()로 표시할 줄 범위 계산
+            let line_ranges: Option<Vec<(usize, usize)>> =
+                if is_in_split_row || has_straddle || has_straddle_limit {
+                // [task_dup_render] straddle 셀은 cell_row < start_row 이므로 intra-row
+                // split_start (cell_row == start_row) 과 상호배타 → straddle_offset 우선.
+                let co = if has_straddle {
+                    straddle_offset
+                } else if is_split_start_row {
+                    split_start_content_offset
+                } else {
+                    0.0
+                };
+                let cl = if has_straddle_limit {
+                    straddle_limit
+                } else if is_split_end_row {
+                    split_end_content_limit
+                } else {
+                    0.0
+                };
                 Some(self.compute_cell_line_ranges(cell, &composed_paras, co, cl, styles))
             } else {
                 None
@@ -480,7 +570,8 @@ impl LayoutEngine {
             } else {
                 false
             };
-            let effective_align = if is_in_split_row && cell_was_split {
+            let effective_align =
+                if (is_in_split_row || has_straddle || has_straddle_limit) && cell_was_split {
                 VerticalAlign::Top
             } else {
                 cell.vertical_align
@@ -563,6 +654,19 @@ impl LayoutEngine {
                 } else {
                     (0, composed.lines.len())
                 };
+
+                // [task_dup_render] 대사 중복 디텍터: 분할 행 셀 문단의 줄 범위 덤프.
+                // env 미설정 시 무동작. scan_dup.py 가 LRD 라인을 파싱해 구간 겹침 검출.
+                if line_range_dump_enabled() {
+                    eprintln!(
+                        "LRD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        section_index, para_index, control_index, cell_idx, cp_idx,
+                        start_line, end_line, start_row, end_row, is_continuation,
+                        is_split_start_row, is_split_end_row, is_repeated_header_cell,
+                        cell_row, cell.row_span, split_start_content_offset,
+                        split_end_content_limit,
+                    );
+                }
 
                 // 분할 셀에서 offset에 의해 완전히 소비된 문단은 스킵
                 // (중첩 표 포함 문단도 range가 (n,n)이면 이전 페이지에서 이미 렌더링됨)

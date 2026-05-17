@@ -1935,6 +1935,26 @@ impl TypesetEngine {
         let base_available = st.base_available_height();
         let table_available = available; // 각주/존 오프셋 차감된 가용 높이
 
+        // host 문단 pre-text(표 위 텍스트 — 예: "1회 씬 구성표" 타이틀) 높이.
+        // place_table_with_text 의 pre_height 와 동일 공식. fits 경로는 pre_height 를
+        // current_height 에 더하지만 분할 경로는 미반영했다 → 표 행이 pre-text 영역을
+        // 침범해 페이지 하단에서 클립. 첫 fragment 의 가용 높이에서 차감한다.
+        let host_pre_height: f64 = {
+            let voff = Self::get_table_vertical_offset(table);
+            let pre_end = if voff > 0 && !para.text.is_empty() {
+                fmt.line_heights.len()
+            } else {
+                0
+            };
+            let is_first_table = !para.controls.iter().take(ctrl_idx)
+                .any(|c| matches!(c, Control::Table(_)));
+            if pre_end > 0 && is_first_table {
+                fmt.line_advances_sum(0..pre_end)
+            } else {
+                0.0
+            }
+        };
+
         // 첫 행이 남은 공간보다 크면 다음 페이지로 (인트라-로우 분할 가능성 확인).
         // Task #398: rowspan>1 셀이 행 0의 시작점이면 블록 전체 높이로 판정.
         let remaining_on_page = (table_available - st.current_height).max(0.0);
@@ -2020,7 +2040,7 @@ impl TypesetEngine {
             let page_avail = if is_continuation {
                 base_available
             } else {
-                (table_available - st.current_height - caption_extra).max(0.0)
+                (table_available - st.current_height - caption_extra - host_pre_height).max(0.0)
             };
 
             let header_overhead = if is_continuation && mt.repeat_header && mt.has_header_cells && row_count > 1 {
@@ -2120,7 +2140,17 @@ impl TypesetEngine {
                         // (2022 국립국어원 p31 row 8 케이스). 임계값 25 px 는
                         // synam-001 의 정합 분할 (27.3 px) 과 본 결함 (17.6 px) 사이.
                         const MIN_TOP_KEEP_PX: f64 = 25.0;
-                        if avail_content_for_r >= MIN_SPLIT_CONTENT_PX
+                        if remaining_content <= 0.0
+                            && avail_content_for_r >= MIN_SPLIT_CONTENT_PX
+                        {
+                            // 행 콘텐츠 전체가 잔여 공간에 들어감. find_break_row 가
+                            // row_heights 과대추정으로 행을 제외했으나 실측 content 는
+                            // fit — 통째 포함한다. split_end_limit 에 정밀 content 높이를
+                            // 넣어 partial_height 가 row_heights 과대분 대신 정밀값을
+                            // 쓰게 해 페이지 overflow 를 막는다 (페이지 끝 공백 회귀 차단).
+                            end_row = r + 1;
+                            split_end_limit = total_content.max(MIN_SPLIT_CONTENT_PX);
+                        } else if avail_content_for_r >= MIN_SPLIT_CONTENT_PX
                             && avail_content_for_r >= min_first_line
                             && avail_content_for_r >= MIN_TOP_KEEP_PX
                             && remaining_content >= MIN_SPLIT_CONTENT_PX

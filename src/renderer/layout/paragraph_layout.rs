@@ -22,6 +22,16 @@ pub(crate) fn layout_debug_enabled() -> bool {
     std::env::var("RHWP_LAYOUT_DEBUG").map(|v| v == "1").unwrap_or(false)
 }
 
+/// `RHWP_LINE_RANGE_DUMP` 설정 시 분할 행 셀 문단의 줄 범위를 stderr 로 덤프한다.
+/// 본문 표 분할 시 대사 중복 결함 (task_dup_render) 의 프로그래매틱 디텍터용.
+/// env 미설정 시 완전 무동작 — `OnceLock` 으로 1회만 평가.
+#[inline]
+pub(crate) fn line_range_dump_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("RHWP_LINE_RANGE_DUMP").is_ok())
+}
+
 /// lineseg baseline_distance를 폰트 어센트 기준으로 보정한다.
 /// CENTER 문단 수직정렬 등으로 baseline이 50% 이하로 설정된 경우,
 /// 텍스트 어센트(~80%)가 줄 박스 밖으로 넘치지 않도록 보장한다.
@@ -2974,17 +2984,42 @@ impl LayoutEngine {
 
                 // 각 줄의 텍스트에서 AutoNumber 위치를 찾아 번호로 대체
                 // HWP5/HWPX/HWP3 공통: 공백 두 개("  ") 패턴 탐색
+                //
+                // 2026-05-15: marker char(0x0012→' ') 와 인접 일반 공백이 baseline 의 char_shape 차이로
+                // 별도 run 으로 분리될 수 있음 (MBC/SBS footer 같이 marker+작품명 통합 paragraph).
+                // 그래서 run 단위 find("  ") 만 시도하면 marker 자리 매치 실패 → marker 위치 잃음.
+                // → line 안 runs.text 를 concat 한 후 글로벌 find("  ") 위치를 찾고 해당 run 에 삽입.
                 for line in &mut composed.lines {
-                    for run in &mut line.runs {
-                        if let Some(pos) = run.text.find("  ") {
-                            run.text = format!("{}{}{}", &run.text[..pos+1], num_str, &run.text[pos+1..]);
-                            return;
-                        }
+                    if try_apply_auto_num_in_line(&mut line.runs, &num_str) {
+                        return;
                     }
                 }
             }
         }
     }
+}
+
+/// AutoNumber marker 자리 "  " 패턴을 line 안 runs 전체에서 찾아 number 삽입.
+/// runs 의 text 를 concat 후 글로벌 위치 찾기 → 해당 run 에서 char boundary 안전 삽입.
+/// 반환 true = 적용 완료 (호출자가 outer loop break 신호).
+fn try_apply_auto_num_in_line(runs: &mut Vec<crate::renderer::composer::ComposedTextRun>, num_str: &str) -> bool {
+    let concat: String = runs.iter().map(|r| r.text.as_str()).collect();
+    let Some(global_byte_pos) = concat.find("  ") else { return false };
+    let mut acc_bytes = 0usize;
+    for run in runs.iter_mut() {
+        let run_len = run.text.len();
+        if acc_bytes + run_len > global_byte_pos {
+            let local_byte = global_byte_pos - acc_bytes;
+            // local_byte 와 local_byte+1 모두 char boundary (ASCII 공백 0x20 은 1 byte). 안전 검사.
+            if run.text.is_char_boundary(local_byte) && run.text.is_char_boundary(local_byte + 1) {
+                run.text = format!("{}{}{}", &run.text[..local_byte + 1], num_str, &run.text[local_byte + 1..]);
+                return true;
+            }
+            return false;
+        }
+        acc_bytes += run_len;
+    }
+    false
 }
 
 /// HWP PUA 문자를 표준 Unicode 로 매핑.

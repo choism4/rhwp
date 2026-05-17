@@ -369,6 +369,8 @@ fn parse_cell(records: &[Record]) -> Cell {
     // bit 16=0: 표 기본 여백 사용 — 단, 레이아웃 시 표 기본 패딩으로 대체
     // → 파싱 단계에서는 원본값을 보존하고, 레이아웃에서 처리
     cell.apply_inner_margin = (list_attr >> 16) & 0x01 != 0;
+    // 한컴 "셀 속성 → 한 줄로 입력" — list_attr bit 19. true 면 셀 폭 초과해도 줄바꿈 안 함.
+    cell.one_line_input = (list_attr >> 19) & 0x01 != 0;
 
     // 34바이트 이후 추가 데이터 보존 (라운드트립용)
     if r.remaining() > 0 {
@@ -379,6 +381,14 @@ fn parse_cell(records: &[Record]) -> Cell {
 
     // 셀 내부 문단 파싱
     cell.paragraphs = parse_paragraph_list(&records[1..]);
+
+    // 한 줄로 입력: paragraph.line_segs 비우기 → compose_paragraph 가 단일 ComposedLine 생성.
+    // height_measurer 의 recompose_for_cell_width 호출도 cell.one_line_input 체크로 skip.
+    if cell.one_line_input {
+        for p in cell.paragraphs.iter_mut() {
+            p.line_segs.clear();
+        }
+    }
 
     cell
 }

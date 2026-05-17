@@ -9,7 +9,7 @@ use super::super::render_tree::*;
 use super::super::page_layout::LayoutRect;
 use super::super::composer::compose_paragraph;
 use super::super::style_resolver::ResolvedStyleSet;
-use super::super::{hwpunit_to_px, PathCommand, TextStyle, ShapeStyle};
+use super::super::{hwpunit_to_px, PathCommand, TextStyle, ShapeStyle, format_number, NumberFormat as NumFmt};
 use super::super::pagination::PageItem;
 use crate::model::shape::{HorzRelTo, HorzAlign, VertRelTo, VertAlign};
 use super::LayoutEngine;
@@ -1307,24 +1307,40 @@ impl LayoutEngine {
             .collect();
 
         // AutoNumber(Page) 치환: 글상자 안의 쪽번호 필드를 현재 페이지 번호로 변환
+        // AutoNumber.format(HWP 표 134)을 존중하여 Arabic/A,B,C 등 양식 적용.
         let current_pn = self.current_page_number.get();
         if current_pn > 0 {
             for (pi, para) in text_box.paragraphs[..para_count].iter().enumerate() {
-                let has_page_auto = para.controls.iter().any(|c|
-                    matches!(c, crate::model::control::Control::AutoNumber(an)
-                        if an.number_type == crate::model::control::AutoNumberType::Page));
-                if has_page_auto {
-                    let page_str = current_pn.to_string();
+                let page_auto_format: Option<u8> = para.controls.iter().find_map(|c|
+                    if let crate::model::control::Control::AutoNumber(an) = c {
+                        if an.number_type == crate::model::control::AutoNumberType::Page {
+                            Some(an.format)
+                        } else { None }
+                    } else { None }
+                );
+                if let Some(fmt_byte) = page_auto_format {
+                    let page_str = format_number(current_pn as u16, NumFmt::from_hwp_format(fmt_byte));
                     if let Some(comp) = composed_paras.get_mut(pi) {
-                        for line in &mut comp.lines {
+                        // 2026-05-15 E-8 fix: page number 는 paragraph 당 1번만 삽입.
+                        // 기존엔 run.text.trim().is_empty() 가 빈 문자열("") trailing run 에도
+                        // 매치되어, marker+작품명 통합 footer(MBC/SBS)에서 작품명 끝 빈 run 에
+                        // page_str 가 또 채워짐 → "...제 1 부 1 0" 잔존.
+                        // → 빈 문자열 run 제외(공백만 있는 실제 marker placeholder 만) + done flag.
+                        let mut done = false;
+                        'apply: for line in &mut comp.lines {
                             for run in &mut line.runs {
                                 if run.text.contains('\u{0015}') {
                                     run.text = run.text.replace('\u{0015}', &page_str);
-                                } else if run.text.trim().is_empty() {
+                                    done = true;
+                                    break 'apply;
+                                } else if !run.text.is_empty() && run.text.trim().is_empty() {
                                     run.text = page_str.clone();
+                                    done = true;
+                                    break 'apply;
                                 }
                             }
                         }
+                        let _ = done;
                     }
                 }
             }

@@ -3814,6 +3814,209 @@ impl DocumentCore {
         self.event_log.push(DocumentEvent::PictureInserted { section: section_idx, para: para_idx });
         Ok(format!("{{\"ok\":true,\"paraIdx\":{},\"controlIdx\":{}}}", para_idx, insert_idx))
     }
+
+    /// 글상자(Shape 내부 TextBox) 텍스트를 한 문장으로 교체.
+    /// 첫 paragraph 만 유지하고 나머지는 비운다(템플릿 타이틀 용도).
+    /// 베이스 HWP 에 박힌 다른 작품/회차 타이틀("10화 씬 구성표" 등)을 사용자
+    /// 입력 ctx 기반 텍스트("1회 씬 구성표")로 교체하기 위한 외부 API.
+    pub fn set_text_box_text_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        text: &str,
+    ) -> Result<String, HwpError> {
+        let section = self.document.sections.get_mut(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
+        let para = section.paragraphs.get_mut(parent_para_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("문단 {} 범위 초과", parent_para_idx)))?;
+        let ctrl = para.controls.get_mut(control_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("컨트롤 {} 범위 초과", control_idx)))?;
+        let shape = match ctrl {
+            Control::Shape(s) => s.as_mut(),
+            _ => return Err(HwpError::RenderError("지정된 컨트롤이 Shape이 아닙니다".to_string())),
+        };
+        let text_box = super::super::helpers::get_textbox_from_shape_mut(shape)
+            .ok_or_else(|| HwpError::RenderError("Shape에 글상자(TextBox)가 없습니다".to_string()))?;
+
+        // 첫 paragraph 외 모두 제거. 비어있으면 default Paragraph 하나 push.
+        if text_box.paragraphs.is_empty() {
+            text_box.paragraphs.push(Paragraph::default());
+        }
+        text_box.paragraphs.truncate(1);
+        let first = &mut text_box.paragraphs[0];
+        let len = first.text.chars().count();
+        if len > 0 {
+            first.delete_text_at(0, len);
+        }
+        if !text.is_empty() {
+            first.insert_text_at(0, text);
+        }
+
+        // 섹션 dirty + re-pagination — setShapeProperties 동일 패턴.
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+
+        Ok(super::super::helpers::json_ok())
+    }
+
+    /// section 의 모든 paragraph (본문 + 표 cell + 도형 글상자 + 캡션) 의 text 에서 from→to 치환.
+    /// 표/도형 내부 paragraph 까지 재귀 처리.
+    pub fn replace_text_everywhere_native(
+        &mut self,
+        section_idx: usize,
+        from: &str,
+        to: &str,
+    ) -> Result<String, HwpError> {
+        if from.is_empty() {
+            return Ok(super::super::helpers::json_ok_with("\"replaced\":0"));
+        }
+        let section = self.document.sections.get_mut(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
+
+        let from_chars: Vec<char> = from.chars().collect();
+        let from_len = from_chars.len();
+        let mut replaced = 0usize;
+
+        fn replace_in_paragraph(
+            para: &mut Paragraph,
+            from_chars: &[char],
+            from_len: usize,
+            to: &str,
+        ) -> usize {
+            let mut n = 0;
+            loop {
+                let text_chars: Vec<char> = para.text.chars().collect();
+                let text_len = text_chars.len();
+                if from_len > text_len { break; }
+                let mut hit: Option<usize> = None;
+                for i in 0..=text_len - from_len {
+                    if &text_chars[i..i + from_len] == from_chars {
+                        hit = Some(i);
+                        break;
+                    }
+                }
+                match hit {
+                    Some(i) => {
+                        para.delete_text_at(i, from_len);
+                        if !to.is_empty() {
+                            para.insert_text_at(i, to);
+                        }
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            n
+        }
+
+        fn walk_controls(
+            controls: &mut [crate::model::control::Control],
+            from_chars: &[char],
+            from_len: usize,
+            to: &str,
+        ) -> usize {
+            let mut n = 0;
+            for ctrl in controls.iter_mut() {
+                match ctrl {
+                    crate::model::control::Control::Table(t) => {
+                        for cell in t.cells.iter_mut() {
+                            for cp in cell.paragraphs.iter_mut() {
+                                n += replace_in_paragraph(cp, from_chars, from_len, to);
+                                n += walk_controls(&mut cp.controls, from_chars, from_len, to);
+                            }
+                        }
+                        if let Some(cap) = t.caption.as_mut() {
+                            for cp in cap.paragraphs.iter_mut() {
+                                n += replace_in_paragraph(cp, from_chars, from_len, to);
+                                n += walk_controls(&mut cp.controls, from_chars, from_len, to);
+                            }
+                        }
+                    }
+                    crate::model::control::Control::Shape(s) => {
+                        if let Some(tb) = super::super::helpers::get_textbox_from_shape_mut(s.as_mut()) {
+                            for cp in tb.paragraphs.iter_mut() {
+                                n += replace_in_paragraph(cp, from_chars, from_len, to);
+                                n += walk_controls(&mut cp.controls, from_chars, from_len, to);
+                            }
+                        }
+                    }
+                    crate::model::control::Control::Picture(p) => {
+                        if let Some(cap) = p.caption.as_mut() {
+                            for cp in cap.paragraphs.iter_mut() {
+                                n += replace_in_paragraph(cp, from_chars, from_len, to);
+                                n += walk_controls(&mut cp.controls, from_chars, from_len, to);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            n
+        }
+
+        for para in section.paragraphs.iter_mut() {
+            replaced += replace_in_paragraph(para, &from_chars, from_len, to);
+            replaced += walk_controls(&mut para.controls, &from_chars, from_len, to);
+        }
+
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+
+        Ok(super::super::helpers::json_ok_with(&format!("\"replaced\":{}", replaced)))
+    }
+
+    /// section 본문 paragraph 들의 text 에서 from→to 치환. 표/inline 컨트롤은 손대지 않고
+    /// paragraph.text(=PARA_TEXT 인라인 문자열) 만 대상. char_offsets/char_shapes/line_segs
+    /// 갱신은 delete_text_at + insert_text_at 조합으로 안전 처리.
+    pub fn replace_text_in_body_native(
+        &mut self,
+        section_idx: usize,
+        from: &str,
+        to: &str,
+    ) -> Result<String, HwpError> {
+        if from.is_empty() {
+            return Ok(super::super::helpers::json_ok_with("\"replaced\":0"));
+        }
+        let section = self.document.sections.get_mut(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
+
+        let from_chars: Vec<char> = from.chars().collect();
+        let from_len = from_chars.len();
+        let mut replaced = 0usize;
+        for para in section.paragraphs.iter_mut() {
+            loop {
+                let text_chars: Vec<char> = para.text.chars().collect();
+                let text_len = text_chars.len();
+                if from_len > text_len { break; }
+                let mut hit: Option<usize> = None;
+                for i in 0..=text_len - from_len {
+                    if text_chars[i..i + from_len] == from_chars[..] {
+                        hit = Some(i);
+                        break;
+                    }
+                }
+                match hit {
+                    Some(i) => {
+                        para.delete_text_at(i, from_len);
+                        if !to.is_empty() {
+                            para.insert_text_at(i, to);
+                        }
+                        replaced += 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+
+        Ok(super::super::helpers::json_ok_with(&format!("\"replaced\":{}", replaced)))
+    }
 }
 
 #[cfg(test)]

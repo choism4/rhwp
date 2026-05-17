@@ -924,6 +924,435 @@ impl DocumentCore {
 
         Ok("{\"ok\":true}".to_string())
     }
+
+    /// 구역의 바탕쪽(master page) 텍스트를 find-and-replace 한다.
+    ///
+    /// extra_child_records의 PARA_TEXT 레코드(UTF-16LE)를 디코드 → `from` 부분 문자열 발견 시
+    /// `to`로 치환 → 재인코드. 같은 paragraph의 PARA_HEADER(앞에 위치) char_count도 갱신.
+    /// 텍스트박스 안 paragraph도 동일 레코드 시퀀스로 평탄 저장되므로 같은 패스에서 처리.
+    ///
+    /// 직렬화 source-of-truth는 paragraphs[0].controls의 SectionDef Box. section_def 미러도 갱신.
+    ///
+    /// 반환: `{ok, replaced: N}`
+    pub fn replace_text_in_master_pages_native(
+        &mut self,
+        section_idx: usize,
+        from: &str,
+        to: &str,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        use crate::parser::tags;
+        if from.is_empty() {
+            return Ok("{\"ok\":true,\"replaced\":0}".to_string());
+        }
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)",
+                section_idx,
+                self.document.sections.len()
+            )));
+        }
+
+        let mut replaced = 0usize;
+        let section = &mut self.document.sections[section_idx];
+
+        // helper: 레코드 슬라이스 안의 PARA_TEXT를 find-replace + 앞쪽 PARA_HEADER char_count 갱신.
+        fn apply_replace(records: &mut [crate::model::document::RawRecord], from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            // PARA_HEADER 인덱스 추적 (각 level별 가장 최근 본 것).
+            let mut last_header_idx_by_level: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+            for i in 0..records.len() {
+                let level = records[i].level;
+                let tag = records[i].tag_id;
+                if tag == tags::HWPTAG_PARA_HEADER {
+                    last_header_idx_by_level.insert(level, i);
+                    continue;
+                }
+                if tag != tags::HWPTAG_PARA_TEXT {
+                    continue;
+                }
+                // PARA_TEXT 데이터: UTF-16LE. 디코드.
+                let bytes = &records[i].data;
+                if bytes.len() % 2 != 0 {
+                    continue;
+                }
+                let utf16: Vec<u16> = (0..bytes.len() / 2)
+                    .map(|j| u16::from_le_bytes([bytes[j * 2], bytes[j * 2 + 1]]))
+                    .collect();
+                let text = match String::from_utf16(&utf16) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                // 2026-05-15 E-1 fix: AutoNumber inline 컨트롤(0x0012)은 16-byte extended
+                // control 이라 단순 UTF-16 디코드/replace/재인코드 시 16-byte 구조가 8개
+                // garbage char 로 디코드되어 깨짐 → 페이지번호 마커 소실. 0x0012 포함
+                // record 는 raw replace skip.
+                //
+                // 2026-05-15 D-7 fix: skip 범위는 0x0012 만. 이전엔 0x0001~0x000F 까지
+                // 포함했으나, marker 없는 footer 작품명 record 도 필드/charshape control
+                // (0x01~0x0F)을 포함할 수 있어 작품명·회차 치환이 통째로 차단됐다
+                // (저스티스 footer 가 baseline 회차 "제 7 부" 그대로 노출).
+                if text.contains('\u{0012}') {
+                    continue;
+                }
+                if !text.contains(from) {
+                    continue;
+                }
+                let new_text = text.replace(from, to);
+                // 재인코드.
+                let new_utf16: Vec<u16> = new_text.encode_utf16().collect();
+                let mut new_bytes = Vec::with_capacity(new_utf16.len() * 2);
+                for unit in &new_utf16 {
+                    new_bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                records[i].data = new_bytes;
+                count += 1;
+
+                // 같은 paragraph의 PARA_HEADER char_count 갱신.
+                // PARA_TEXT의 level은 PARA_HEADER level + 1. 후보 level은 level-1.
+                let header_level = level.saturating_sub(1);
+                if let Some(&hi) = last_header_idx_by_level.get(&header_level) {
+                    if records[hi].data.len() >= 4 {
+                        let new_count = new_utf16.len() as u32;
+                        let old_first4 = u32::from_le_bytes([
+                            records[hi].data[0],
+                            records[hi].data[1],
+                            records[hi].data[2],
+                            records[hi].data[3],
+                        ]);
+                        let msb_bit = old_first4 & 0x80000000;
+                        let updated = msb_bit | (new_count & 0x7FFFFFFF);
+                        let upd_bytes = updated.to_le_bytes();
+                        records[hi].data[0] = upd_bytes[0];
+                        records[hi].data[1] = upd_bytes[1];
+                        records[hi].data[2] = upd_bytes[2];
+                        records[hi].data[3] = upd_bytes[3];
+                    }
+                }
+            }
+            count
+        }
+
+        // 0) source 비어있으면 mirror 에서 복제 — 라운드트립으로 source 가 비고 mirror 만 채워진 케이스 대응.
+        //    직렬화는 paragraphs[0].controls SectionDef.extra_child_records (line 233 serializer/control.rs) 만 사용.
+        let mirror_records = section.section_def.extra_child_records.clone();
+        let mut sd_was_empty = false;
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    if sd.extra_child_records.is_empty() && !mirror_records.is_empty() {
+                        sd.extra_child_records = mirror_records.clone();
+                        sd_was_empty = true;
+                    }
+                }
+            }
+        }
+        let _ = sd_was_empty;
+        // 1) 직렬화 source-of-truth: paragraphs[0].controls의 SectionDef Box
+        let mut src_replaced = 0usize;
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    src_replaced += apply_replace(&mut sd.extra_child_records, from, to);
+                }
+            }
+        }
+        replaced += src_replaced;
+        // 2) section_def 미러
+        let mirror_replaced = apply_replace(&mut section.section_def.extra_child_records, from, to);
+        replaced += mirror_replaced;
+
+        // 3) master_pages 파싱된 뷰도 sync.
+        // PDF/SVG 렌더 path는 master_pages 모델의 paragraph.text 를 사용하므로,
+        // extra_child_records 만 갱신하면 export 는 OK 지만 in-memory 렌더는 baseline 텍스트 그대로 노출됨.
+        // 2026-05-14 회귀: KBS/MBC/SBS 본문에 "검사내전 제 10 화" 등 baseline footer 잔존.
+        // master_pages 는 section.section_def.master_pages 및 paragraphs[0].controls 의 SectionDef 박스 두 곳에 존재.
+        //
+        // footer 텍스트는 보통 outer paragraph 가 아니라 그 안의 Shape(글상자) -> TextBox.paragraphs[i].text 에 있음.
+        // 그래서 outer paragraphs + 모든 Shape 의 text_box.paragraphs 까지 재귀 sync.
+        // 재귀: paragraph 안 모든 control 의 nested paragraphs (Footer/Header/Table cells/Shape text_box).
+        // page_numbering_query.rs:update_paragraph 패턴과 동일.
+        fn sync_nested_in_controls(
+            para: &mut crate::model::paragraph::Paragraph,
+            from: &str,
+            to: &str,
+        ) -> usize {
+            let mut count = 0usize;
+            for ctrl in para.controls.iter_mut() {
+                match ctrl {
+                    Control::Footer(f) => {
+                        for p in f.paragraphs.iter_mut() {
+                            count += sync_paragraph(p, from, to);
+                        }
+                    }
+                    Control::Header(h) => {
+                        for p in h.paragraphs.iter_mut() {
+                            count += sync_paragraph(p, from, to);
+                        }
+                    }
+                    Control::Table(t) => {
+                        for cell in t.cells.iter_mut() {
+                            for p in cell.paragraphs.iter_mut() {
+                                count += sync_paragraph(p, from, to);
+                            }
+                        }
+                    }
+                    Control::Shape(shape) => {
+                        count += sync_shape_object(shape.as_mut(), from, to);
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
+        fn sync_shape_object(obj: &mut crate::model::shape::ShapeObject, from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            if let Some(drawing) = obj.drawing_mut() {
+                if let Some(tb) = drawing.text_box.as_mut() {
+                    for inner_para in tb.paragraphs.iter_mut() {
+                        count += sync_paragraph(inner_para, from, to);
+                    }
+                }
+            }
+            // ShapeObject::Group 의 children 재귀 — 묶음 도형 안 paragraph 들 sync.
+            // D-8 회귀: master_pages 잔존 "어빠 르" 같은 partial 텍스트 = Group children 안 paragraph 누락.
+            if let crate::model::shape::ShapeObject::Group(g) = obj {
+                for child in g.children.iter_mut() {
+                    count += sync_shape_object(child, from, to);
+                }
+            }
+            count
+        }
+        fn sync_paragraph(para: &mut crate::model::paragraph::Paragraph, from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            // 자동번호(AutoNumber) 컨트롤이 있는 paragraph 는 text sync skip — 마커 위치 깨짐 방지.
+            // MBC/SBS baseline footer "...작품명..." 글상자에 자동번호(Page) inline 포함 케이스.
+            // text 치환 시 마커 character_offset 시프트되어 페이지번호 표시 안 됨.
+            let has_autonum = para.controls.iter().any(|c| matches!(c, Control::AutoNumber(_)));
+            if has_autonum {
+                // controls 안 nested paragraphs 만 재귀 sync (outer paragraph 자체는 마커 보존)
+                let inner_count = sync_nested_in_controls(para, from, to);
+                // Shape inner text 변경 시 outer paragraph 의 line_segs 캐시 invalidate.
+                if inner_count > 0 {
+                    para.line_segs.clear();
+                }
+                return inner_count;
+            }
+            if para.text.contains(from) {
+                let new_text = para.text.replace(from, to);
+                let new_utf16: Vec<u16> = new_text.encode_utf16().collect();
+                let new_char_count = new_utf16.len() as u32;
+                let mut new_offsets: Vec<u32> = Vec::with_capacity(new_text.chars().count() + 1);
+                let mut idx: u32 = 0;
+                for ch in new_text.chars() {
+                    new_offsets.push(idx);
+                    let mut buf = [0u16; 2];
+                    idx += ch.encode_utf16(&mut buf).len() as u32;
+                }
+                new_offsets.push(idx);
+                para.text = new_text;
+                para.char_count = new_char_count;
+                para.char_offsets = new_offsets;
+                para.line_segs.clear();
+                count += 1;
+            }
+            // 안에 Footer/Header/Table cells/Shape 글상자 nested paragraphs 재귀 sync.
+            count += sync_nested_in_controls(para, from, to);
+            count
+        }
+        fn sync_master(masters: &mut [crate::model::header_footer::MasterPage], from: &str, to: &str) -> usize {
+            let mut count = 0usize;
+            for master in masters.iter_mut() {
+                for para in master.paragraphs.iter_mut() {
+                    count += sync_paragraph(para, from, to);
+                }
+            }
+            count
+        }
+        replaced += sync_master(&mut section.section_def.master_pages, from, to);
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    replaced += sync_master(&mut sd.master_pages, from, to);
+                }
+            }
+        }
+
+        section.raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+        Ok(format!("{{\"ok\":true,\"replaced\":{}}}", replaced))
+    }
+
+    /// 구역의 바탕쪽(master page) 안 paragraph 텍스트를 모두 읽어 반환한다.
+    ///
+    /// JS 쪽에서 regex 등으로 패턴 매칭 → `replace_text_in_master_pages_native` 호출용.
+    /// 반환: JSON `{"ok":true,"texts":["...","..."]}`
+    pub fn get_master_pages_text_native(
+        &self,
+        section_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        use crate::parser::tags;
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)",
+                section_idx,
+                self.document.sections.len()
+            )));
+        }
+        let section = &self.document.sections[section_idx];
+        let mut texts: Vec<String> = Vec::new();
+        // 직렬화 source-of-truth와 동일한 위치에서 읽어 일관성 유지.
+        for para in section.paragraphs.iter() {
+            for ctrl in para.controls.iter() {
+                if let Control::SectionDef(sd) = ctrl {
+                    for rec in sd.extra_child_records.iter() {
+                        if rec.tag_id != tags::HWPTAG_PARA_TEXT {
+                            continue;
+                        }
+                        if rec.data.len() % 2 != 0 {
+                            continue;
+                        }
+                        let utf16: Vec<u16> = (0..rec.data.len() / 2)
+                            .map(|j| u16::from_le_bytes([rec.data[j * 2], rec.data[j * 2 + 1]]))
+                            .collect();
+                        if let Ok(s) = String::from_utf16(&utf16) {
+                            if !s.is_empty() {
+                                texts.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 강한 JSON escape: 모든 control char(0x00-0x1F) \uXXXX로. HWP paragraph text는
+        // 0x09(필드), 0x0F 등 다양한 컨트롤이 섞여 있어 기본 json_escape로는 부족.
+        fn json_escape_strong(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for c in s.chars() {
+                match c {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out
+        }
+        let joined = texts
+            .iter()
+            .map(|s| format!("\"{}\"", json_escape_strong(s)))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!("{{\"ok\":true,\"texts\":[{}]}}", joined))
+    }
+
+    /// 구역의 바탕쪽(master page)을 전부 제거한다.
+    ///
+    /// 베이스 HWP에 박힌 작품/회차 텍스트(예: "99억의여자 제 10 부")가 바탕쪽 텍스트박스에
+    /// 들어 있을 때, 출력에서 통째로 빠지도록 비운다.
+    ///
+    /// 직렬화기는 `paragraphs[0].controls`의 `Control::SectionDef(Box<SectionDef>)`를 통해
+    /// extra_child_records를 재기록하므로(serializer/control.rs:233), `section.section_def`만
+    /// 비우면 효과 없음. paragraph control 안의 SectionDef도 같이 비운다.
+    ///
+    /// 반환: `{ok, cleared: <removed count>}`
+    pub fn clear_master_pages_native(
+        &mut self,
+        section_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Control;
+        if section_idx >= self.document.sections.len() {
+            return Err(HwpError::RenderError(format!(
+                "구역 인덱스 {} 범위 초과 (총 {}개)", section_idx, self.document.sections.len()
+            )));
+        }
+        let section = &mut self.document.sections[section_idx];
+        let cleared = section.section_def.master_pages.len();
+        section.section_def.master_pages.clear();
+        section.section_def.extra_child_records.clear();
+        // 직렬화 경로의 실제 source-of-truth는 paragraph control 안의 SectionDef Box.
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    sd.master_pages.clear();
+                    sd.extra_child_records.clear();
+                }
+            }
+        }
+        section.raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        self.paginate_if_needed();
+        Ok(format!("{{\"ok\":true,\"cleared\":{}}}", cleared))
+    }
+
+}
+
+/// 1×1 흰색 24bpp BMP (58 bytes). 그림 BinData 를 무력화(공백)할 때 사용.
+const WHITE_1X1_BMP: [u8; 58] = [
+    0x42, 0x4D, 0x3A, 0, 0, 0, 0, 0, 0, 0, 0x36, 0, 0, 0,
+    0x28, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 24, 0, 0, 0, 0, 0,
+    4, 0, 0, 0, 0x13, 0x0B, 0, 0, 0x13, 0x0B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0xFF, 0xFF, 0xFF, 0,
+];
+
+impl DocumentCore {
+    /// 지정 BinData 그림의 내용을 1×1 흰색 이미지로 교체해 시각적으로 무력화한다.
+    ///
+    /// 바탕쪽(master page) 안의 그림처럼 rhwp 가 control 단위로 surgical 삭제할 수
+    /// 없는 위치(raw record 직렬화 경로)의 잔상 이미지를 제거하기 위한 수단.
+    /// control 구조는 그대로 두고 BinData 스토리지 내용만 흰 이미지로 바꿔, 흰 여백
+    /// 위에서 보이지 않게 한다. 해당 bin 을 참조하는 모든 그림에 영향.
+    ///
+    /// `bin_data_id`: 그림 control 의 `image_attr.bin_data_id` (BinData 목록 1-based).
+    /// 반환: JSON `{"ok":true,"binDataId":N,"storageId":N,"oldExt":"..","oldBytes":N}`
+    pub fn blank_bin_data_image(&mut self, bin_data_id: u16) -> Result<String, HwpError> {
+        use crate::model::bin_data::BinDataCompression;
+        let idx = (bin_data_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.document.doc_info.bin_data_list.len())
+            .ok_or_else(|| {
+                HwpError::RenderError(format!(
+                    "bin_data_id {} 범위 초과 (BinData {}개)",
+                    bin_data_id,
+                    self.document.doc_info.bin_data_list.len()
+                ))
+            })?;
+        let storage_id = self.document.doc_info.bin_data_list[idx].storage_id;
+        let old_ext = self.document.doc_info.bin_data_list[idx]
+            .extension
+            .clone()
+            .unwrap_or_default();
+        // BinData 레코드: 확장자 bmp 로 갱신 (raw_data 클리어 → 모델 직렬화 경로 사용).
+        self.document.doc_info.bin_data_list[idx].extension = Some("bmp".to_string());
+        self.document.doc_info.bin_data_list[idx].raw_data = None;
+        self.document.doc_info.bin_data_list[idx].compression = BinDataCompression::NoCompress;
+        // BinData 스토리지 내용 교체.
+        let mut old_bytes = 0usize;
+        let mut found = false;
+        for c in self.document.bin_data_content.iter_mut() {
+            if c.id == storage_id {
+                old_bytes = c.data.len();
+                c.data = WHITE_1X1_BMP.to_vec();
+                c.extension = "bmp".to_string();
+                found = true;
+            }
+        }
+        if !found {
+            return Err(HwpError::RenderError(format!(
+                "BinDataContent(storage_id={}) 를 찾지 못함",
+                storage_id
+            )));
+        }
+        Ok(format!(
+            "{{\"ok\":true,\"binDataId\":{},\"storageId\":{},\"oldExt\":\"{}\",\"oldBytes\":{}}}",
+            bin_data_id, storage_id, old_ext, old_bytes
+        ))
+    }
 }
 
 #[cfg(test)]

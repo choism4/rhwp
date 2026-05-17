@@ -10,6 +10,7 @@ use super::super::page_layout::LayoutRect;
 use super::super::height_measurer::MeasuredTable;
 use super::super::composer::{compose_paragraph, ComposedParagraph};
 use super::super::style_resolver::ResolvedStyleSet;
+use super::super::{format_number, NumberFormat as NumFmt};
 
 /// [Task #548] paragraph 의 line N 에 적용되는 effective margin_left.
 /// paragraph_layout.rs 의 line_indent 산식과 동일 (단일 룰).
@@ -1220,7 +1221,17 @@ impl LayoutEngine {
                 raw_y
             }
         } else if depth == 0 {
+            // treat_as_char 표는 항상 vert_offset 적용. non-tac 표 중 어울림(Square) 등
+            // 비-floating wrap 도 vert_rel_to=Para + vertical_offset>0 이면 offset 을
+            // 반영한다. 그러지 않으면 "타이틀 텍스트 + 표"가 같은 문단에 있을 때 표가
+            // y_start(문단 시작)에 그려져 타이틀과 겹친다 (씬구성표 회귀). 한컴은 Square
+            // 표의 Para 기준 vert offset 을 반영하므로 동등 동작. vertical_offset 은 u32
+            // 라 음수 비트표현 방지를 위해 i32 캐스트 후 양수 비교.
             let v_offset = if table_treat_as_char {
+                hwpunit_to_px(table.common.vertical_offset as i32, self.dpi)
+            } else if matches!(table.common.vert_rel_to, crate::model::shape::VertRelTo::Para)
+                && (table.common.vertical_offset as i32) > 0
+            {
                 hwpunit_to_px(table.common.vertical_offset as i32, self.dpi)
             } else { 0.0 };
             if let Some(ref caption) = table.caption {
@@ -1354,14 +1365,19 @@ impl LayoutEngine {
             }
 
             // AutoNumber(Page) 치환: 셀 내 쪽번호 필드를 현재 페이지 번호로 변환
+            // AutoNumber.format(HWP 표 134)을 존중하여 Arabic/A,B,C 등 양식 적용.
             let current_pn = self.current_page_number.get();
             if current_pn > 0 {
                 for (cpi, para) in cell.paragraphs.iter().enumerate() {
-                    let has_page_auto = para.controls.iter().any(|c|
-                        matches!(c, Control::AutoNumber(an)
-                            if an.number_type == crate::model::control::AutoNumberType::Page));
-                    if has_page_auto {
-                        let page_str = current_pn.to_string();
+                    let page_auto_format: Option<u8> = para.controls.iter().find_map(|c|
+                        if let Control::AutoNumber(an) = c {
+                            if an.number_type == crate::model::control::AutoNumberType::Page {
+                                Some(an.format)
+                            } else { None }
+                        } else { None }
+                    );
+                    if let Some(fmt_byte) = page_auto_format {
+                        let page_str = format_number(current_pn as u16, NumFmt::from_hwp_format(fmt_byte));
                         if let Some(comp) = composed_paras.get_mut(cpi) {
                             for line in &mut comp.lines {
                                 for run in &mut line.runs {
@@ -2547,14 +2563,6 @@ impl LayoutEngine {
 
                 let line_end_pos = cum + line_h;
 
-                if has_offset && line_end_pos <= content_offset {
-                    // 이전 페이지에서 완전히 렌더링됨 → 스킵
-                    cum = line_end_pos;
-                    para_start = li + 1;
-                    para_end = li + 1;
-                    continue;
-                }
-
                 // [Task #656] break 비교 시 마지막 visible 줄의 trail_ls 제외.
                 // - cum 누적은 line_h (h+ls) 그대로 (이전 줄들의 ls 는 다음 줄 직전 spacing 이므로 렌더)
                 // - break 비교는 line_break_pos = cum + h (이 줄의 ls 제외) 로 비교
@@ -2563,6 +2571,22 @@ impl LayoutEngine {
                 // is_cell_last_line 분기의 trail_ls 미렌더 모델과 동일 본질.
                 // (Task #485 의 epsilon 휴리스틱 본질 정정 — 휴리스틱 마진 없이 일관된 모델, 폰트 무관.)
                 let line_break_pos = cum + h;
+
+                if has_offset && line_break_pos <= content_offset {
+                    // 이전 페이지에서 완전히 렌더링됨 → 스킵.
+                    // [task_dup_render] 스킵 기준을 line_end_pos(trail_ls 포함)에서
+                    //   line_break_pos(trail_ls 제외)로 정정. limit 측 break 비교(#656)는
+                    //   line_break_pos 기준인데 offset 측만 line_end_pos 기준이었다.
+                    //   경계값 content_offset/content_limit 이 줄의 trail_ls 구간에 걸치면
+                    //   page N(limit)은 그 줄을 include, page N+1(offset)은 skip 하지 않아
+                    //   경계 줄이 양쪽 페이지에 중복 출력됐다. 두 측이 동일 기준을 쓰면
+                    //   content_offset==content_limit 일 때 정확히 인접 (중복/누락 0).
+                    cum = line_end_pos;
+                    para_start = li + 1;
+                    para_end = li + 1;
+                    continue;
+                }
+
                 if has_limit && line_break_pos > abs_limit {
                     // [Task #485 Bug-1] outer 루프도 차단 — 후속 단락의 작은 line_h slip 방지.
                     limit_reached = true;

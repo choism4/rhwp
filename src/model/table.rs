@@ -112,6 +112,9 @@ pub struct Cell {
     pub apply_inner_margin: bool,
     /// 제목 셀 여부 (list_attr bit 18)
     pub is_header: bool,
+    /// 한 줄로 입력 (list_attr bit 19) — 한컴 "셀 속성 → 한 줄로 입력" 옵션.
+    /// true 면 셀 폭 초과해도 줄바꿈 안 함 (rhwp recompose_for_cell_width split 차단).
+    pub one_line_input: bool,
     /// LIST_HEADER 레코드의 34바이트 이후 추가 바이트 (라운드트립 보존용)
     pub raw_list_extra: Vec<u8>,
     /// 셀 필드 이름 (한컴 셀 속성 → 필드 → 필드 이름)
@@ -191,6 +194,7 @@ impl Cell {
             vertical_align: template.vertical_align,
             apply_inner_margin: template.apply_inner_margin,
             is_header: template.is_header,
+            one_line_input: template.one_line_input,
             raw_list_extra: template.raw_list_extra.clone(),
             field_name: None,
             paragraphs: vec![para],
@@ -239,17 +243,17 @@ impl Table {
 
     /// raw_ctrl_data 내 CommonObjAttr의 width/height를 재계산하여 갱신한다.
     ///
-    /// raw_ctrl_data 레이아웃 (attr 4바이트 이후):
-    ///   [0..4] vertical_offset, [4..8] horizontal_offset,
-    ///   [8..12] width, [12..16] height, ...
+    /// raw_ctrl_data 실제 레이아웃 (attr **포함**):
+    ///   [0..4] attr, [4..8] vertical_offset, [8..12] horizontal_offset,
+    ///   [12..16] width, [16..20] height, ...
     pub fn update_ctrl_dimensions(&mut self) {
-        if self.raw_ctrl_data.len() < 16 {
+        if self.raw_ctrl_data.len() < 20 {
             return;
         }
         let total_width: HwpUnit = self.get_column_widths().iter().sum();
         let total_height: HwpUnit = self.get_row_heights().iter().sum();
-        self.raw_ctrl_data[8..12].copy_from_slice(&total_width.to_le_bytes());
-        self.raw_ctrl_data[12..16].copy_from_slice(&total_height.to_le_bytes());
+        self.raw_ctrl_data[12..16].copy_from_slice(&total_width.to_le_bytes());
+        self.raw_ctrl_data[16..20].copy_from_slice(&total_height.to_le_bytes());
     }
 
     /// 열별 폭을 추출한다 (col_span==1인 셀 기준).

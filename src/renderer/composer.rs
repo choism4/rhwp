@@ -949,6 +949,13 @@ pub fn recompose_for_cell_width(
     if cell_inner_width_px <= 0.0 {
         return;
     }
+    // FIX (2026-05-14): paragraph 의 ParaShape attr2 bit0-1 = 1 ("한 줄로 입력")이면
+    // 셀 폭 초과해도 줄 분할하지 않는다 — 한컴 "한 줄로 입력" 옵션과 동작 일치.
+    if let Some(ps) = styles.para_styles.get(para.para_shape_id as usize) {
+        if ps.single_line {
+            return;
+        }
+    }
     let single_line = composed.lines.remove(0);
     let total_width = estimate_composed_line_width(&single_line, styles);
     if total_width <= cell_inner_width_px + 0.5 {

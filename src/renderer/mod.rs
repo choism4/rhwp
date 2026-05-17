@@ -551,8 +551,8 @@ pub fn px_to_hwpunit(px: f64, dpi: f64) -> i32 {
 /// 그 외에는 "sans-serif"를 반환한다.
 pub fn generic_fallback(font_family: &str) -> &'static str {
     if font_family.is_empty() {
-        // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → generic
-        return "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif";
+        // Sans-serif: Linux CJK(fontconfig 한글 글리프 보장) → Windows → macOS/iOS → Android → 오픈소스 → generic
+        return "'Noto Sans CJK KR','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif";
     }
     // 고정폭 키워드
     let lower = font_family.to_ascii_lowercase();
@@ -567,23 +567,25 @@ pub fn generic_fallback(font_family: &str) -> &'static str {
     if font_family.contains("바탕") || font_family.contains("명조")
         || font_family.contains("궁서")
     {
-        // Serif: Windows → macOS(Bold 보유 우선) → macOS 기본 → Android → 오픈소스 → 리눅스 시스템 → generic
+        // Serif: Linux CJK(prod fontconfig 한글 글리프 보장) → Windows → macOS(Bold 보유 우선) → macOS 기본 → Android → 오픈소스 → generic
+        // 'Noto Serif CJK KR' 을 chain 맨 앞에 두어 Linux fontconfig 가 한글 글리프 없는
+        // 라틴 폰트("Noto Sans")로 잘못 매핑되는 사고를 막는다. macOS 는 이 폰트가 없으면
+        // 다음 후보로 자연스럽게 fallback.
         // Nanum Myeongjo 는 macOS 10.9+ 기본 설치이며 Bold variant 보유.
-        // AppleMyungjo 보다 앞에 두어야 macOS Chrome 에서 CJK 글리프 bold 매칭 성공.
         // 'Source Han Serif K Old Hangul' (Task #528): @font-face unicode-range 가 옛한글
         // 영역 (U+1100-11FF, U+A960-A97F, U+D7B0-D7FF) 만 매칭하므로 일반 한글에 영향 없음.
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Source Han Serif K Old Hangul',serif";
+        return "'Noto Serif CJK KR','Noto Sans CJK KR','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Source Han Serif K Old Hangul',serif";
     }
     // 세리프 키워드 (영문)
     if lower.contains("times") || lower.contains("hymjre")
         || lower.contains("palatino") || lower.contains("georgia")
         || lower.contains("batang") || lower.contains("gungsuh")
     {
-        return "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Source Han Serif K Old Hangul',serif";
+        return "'Noto Serif CJK KR','Noto Sans CJK KR','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Source Han Serif K Old Hangul',serif";
     }
-    // Sans-serif: Windows → macOS/iOS → Android → 오픈소스 → generic
+    // Sans-serif: Linux CJK → Windows → macOS/iOS → Android → 오픈소스 → generic
     // 'Source Han Serif K Old Hangul' (Task #528): unicode-range 옛한글 자모 영역 한정
-    "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif"
+    "'Noto Sans CJK KR','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif"
 }
 
 // ============================================================
@@ -950,8 +952,10 @@ mod tests {
 
     #[test]
     fn test_generic_fallback() {
-        let serif = "'Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Noto Serif CJK KR','Source Han Serif K Old Hangul',serif";
-        let sans = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif";
+        // 'Noto Serif/Sans CJK KR' 을 chain 앞으로: Linux fontconfig 가 한글 폰트 이름을
+        // 라틴 전용 폰트로 잘못 매핑하는 사고 방지 (Issue: KBS 글상자 한글 잘림).
+        let serif = "'Noto Serif CJK KR','Noto Sans CJK KR','Batang','바탕','Nanum Myeongjo','AppleMyungjo','Noto Serif KR','Source Han Serif K Old Hangul',serif";
+        let sans = "'Noto Sans CJK KR','Malgun Gothic','맑은 고딕','Apple SD Gothic Neo','Noto Sans KR','Pretendard','Source Han Serif K Old Hangul',sans-serif";
         let mono = "'GulimChe','굴림체','D2Coding','Noto Sans Mono',monospace";
         // 세리프 계열
         assert_eq!(generic_fallback("함초롬바탕"), serif);
