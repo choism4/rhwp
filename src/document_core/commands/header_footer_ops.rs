@@ -1289,6 +1289,70 @@ impl DocumentCore {
         self.paginate_if_needed();
         Ok(format!("{{\"ok\":true,\"cleared\":{}}}", cleared))
     }
+
+}
+
+/// 1×1 흰색 24bpp BMP (58 bytes). 그림 BinData 를 무력화(공백)할 때 사용.
+const WHITE_1X1_BMP: [u8; 58] = [
+    0x42, 0x4D, 0x3A, 0, 0, 0, 0, 0, 0, 0, 0x36, 0, 0, 0,
+    0x28, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 24, 0, 0, 0, 0, 0,
+    4, 0, 0, 0, 0x13, 0x0B, 0, 0, 0x13, 0x0B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0xFF, 0xFF, 0xFF, 0,
+];
+
+impl DocumentCore {
+    /// 지정 BinData 그림의 내용을 1×1 흰색 이미지로 교체해 시각적으로 무력화한다.
+    ///
+    /// 바탕쪽(master page) 안의 그림처럼 rhwp 가 control 단위로 surgical 삭제할 수
+    /// 없는 위치(raw record 직렬화 경로)의 잔상 이미지를 제거하기 위한 수단.
+    /// control 구조는 그대로 두고 BinData 스토리지 내용만 흰 이미지로 바꿔, 흰 여백
+    /// 위에서 보이지 않게 한다. 해당 bin 을 참조하는 모든 그림에 영향.
+    ///
+    /// `bin_data_id`: 그림 control 의 `image_attr.bin_data_id` (BinData 목록 1-based).
+    /// 반환: JSON `{"ok":true,"binDataId":N,"storageId":N,"oldExt":"..","oldBytes":N}`
+    pub fn blank_bin_data_image(&mut self, bin_data_id: u16) -> Result<String, HwpError> {
+        use crate::model::bin_data::BinDataCompression;
+        let idx = (bin_data_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.document.doc_info.bin_data_list.len())
+            .ok_or_else(|| {
+                HwpError::RenderError(format!(
+                    "bin_data_id {} 범위 초과 (BinData {}개)",
+                    bin_data_id,
+                    self.document.doc_info.bin_data_list.len()
+                ))
+            })?;
+        let storage_id = self.document.doc_info.bin_data_list[idx].storage_id;
+        let old_ext = self.document.doc_info.bin_data_list[idx]
+            .extension
+            .clone()
+            .unwrap_or_default();
+        // BinData 레코드: 확장자 bmp 로 갱신 (raw_data 클리어 → 모델 직렬화 경로 사용).
+        self.document.doc_info.bin_data_list[idx].extension = Some("bmp".to_string());
+        self.document.doc_info.bin_data_list[idx].raw_data = None;
+        self.document.doc_info.bin_data_list[idx].compression = BinDataCompression::NoCompress;
+        // BinData 스토리지 내용 교체.
+        let mut old_bytes = 0usize;
+        let mut found = false;
+        for c in self.document.bin_data_content.iter_mut() {
+            if c.id == storage_id {
+                old_bytes = c.data.len();
+                c.data = WHITE_1X1_BMP.to_vec();
+                c.extension = "bmp".to_string();
+                found = true;
+            }
+        }
+        if !found {
+            return Err(HwpError::RenderError(format!(
+                "BinDataContent(storage_id={}) 를 찾지 못함",
+                storage_id
+            )));
+        }
+        Ok(format!(
+            "{{\"ok\":true,\"binDataId\":{},\"storageId\":{},\"oldExt\":\"{}\",\"oldBytes\":{}}}",
+            bin_data_id, storage_id, old_ext, old_bytes
+        ))
+    }
 }
 
 #[cfg(test)]
