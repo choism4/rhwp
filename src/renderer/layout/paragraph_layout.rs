@@ -22,6 +22,16 @@ pub(crate) fn layout_debug_enabled() -> bool {
     std::env::var("RHWP_LAYOUT_DEBUG").map(|v| v == "1").unwrap_or(false)
 }
 
+/// `RHWP_LINE_RANGE_DUMP` 설정 시 분할 행 셀 문단의 줄 범위를 stderr 로 덤프한다.
+/// 본문 표 분할 시 대사 중복 결함 (task_dup_render) 의 프로그래매틱 디텍터용.
+/// env 미설정 시 완전 무동작 — `OnceLock` 으로 1회만 평가.
+#[inline]
+pub(crate) fn line_range_dump_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("RHWP_LINE_RANGE_DUMP").is_ok())
+}
+
 /// lineseg baseline_distance를 폰트 어센트 기준으로 보정한다.
 /// CENTER 문단 수직정렬 등으로 baseline이 50% 이하로 설정된 경우,
 /// 텍스트 어센트(~80%)가 줄 박스 밖으로 넘치지 않도록 보장한다.

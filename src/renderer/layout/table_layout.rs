@@ -2563,14 +2563,6 @@ impl LayoutEngine {
 
                 let line_end_pos = cum + line_h;
 
-                if has_offset && line_end_pos <= content_offset {
-                    // 이전 페이지에서 완전히 렌더링됨 → 스킵
-                    cum = line_end_pos;
-                    para_start = li + 1;
-                    para_end = li + 1;
-                    continue;
-                }
-
                 // [Task #656] break 비교 시 마지막 visible 줄의 trail_ls 제외.
                 // - cum 누적은 line_h (h+ls) 그대로 (이전 줄들의 ls 는 다음 줄 직전 spacing 이므로 렌더)
                 // - break 비교는 line_break_pos = cum + h (이 줄의 ls 제외) 로 비교
@@ -2579,6 +2571,22 @@ impl LayoutEngine {
                 // is_cell_last_line 분기의 trail_ls 미렌더 모델과 동일 본질.
                 // (Task #485 의 epsilon 휴리스틱 본질 정정 — 휴리스틱 마진 없이 일관된 모델, 폰트 무관.)
                 let line_break_pos = cum + h;
+
+                if has_offset && line_break_pos <= content_offset {
+                    // 이전 페이지에서 완전히 렌더링됨 → 스킵.
+                    // [task_dup_render] 스킵 기준을 line_end_pos(trail_ls 포함)에서
+                    //   line_break_pos(trail_ls 제외)로 정정. limit 측 break 비교(#656)는
+                    //   line_break_pos 기준인데 offset 측만 line_end_pos 기준이었다.
+                    //   경계값 content_offset/content_limit 이 줄의 trail_ls 구간에 걸치면
+                    //   page N(limit)은 그 줄을 include, page N+1(offset)은 skip 하지 않아
+                    //   경계 줄이 양쪽 페이지에 중복 출력됐다. 두 측이 동일 기준을 쓰면
+                    //   content_offset==content_limit 일 때 정확히 인접 (중복/누락 0).
+                    cum = line_end_pos;
+                    para_start = li + 1;
+                    para_end = li + 1;
+                    continue;
+                }
+
                 if has_limit && line_break_pos > abs_limit {
                     // [Task #485 Bug-1] outer 루프도 차단 — 후속 단락의 작은 line_h slip 방지.
                     limit_reached = true;
