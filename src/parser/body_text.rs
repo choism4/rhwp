@@ -102,7 +102,8 @@ pub fn parse_body_text_section(data: &[u8]) -> Result<Section, BodyTextError> {
                     let tail: Vec<RawRecord> = all_records[scan..].iter()
                         .map(|r| RawRecord { tag_id: r.tag_id, level: r.level, data: r.data.clone() })
                         .collect();
-                    let ext_mps = parse_master_pages_from_raw(&tail);
+                    let ext_mps = parse_master_pages_from_raw(
+                        &tail, section.section_def.page_def.height as i32);
                     section.section_def.master_pages.extend(ext_mps);
                     break;
                 }
@@ -592,24 +593,61 @@ fn parse_section_def(ctrl_data: &[u8], child_records: &[Record]) -> SectionDef {
     }
 
     // extra_child_records에서 바탕쪽 (LIST_HEADER) 파싱
-    sd.master_pages = parse_master_pages_from_raw(&sd.extra_child_records);
+    sd.master_pages = parse_master_pages_from_raw(
+        &sd.extra_child_records, sd.page_def.height as i32);
 
     sd
+}
+
+/// 바탕쪽 문단에서 footer(쪽번호) 글상자의 **페이지 상단 기준 실제 세로
+/// 위치**(HWPUNIT)를 찾는다.
+///
+/// footer 글상자 = 내부 텍스트박스에 자동번호(쪽번호) 컨트롤을 가진 도형.
+/// vertical_offset 은 vert_align(Top/Bottom) 기준점이 다르므로, 페이지
+/// 상단 기준 위치로 환산한다 (Bottom 정렬이면 paper_height 에서 차감).
+/// 바탕쪽 종류(홀수/짝수) 판별의 기하 신호로 쓴다 — 한컴은 footer band 가
+/// 위/아래로 갈리는 편집틀에서 종류별 footer 세로위치가 다르다.
+fn master_footer_voff(paragraphs: &[Paragraph], paper_height: i32) -> Option<i32> {
+    use crate::model::shape::{ShapeObject, VertAlign};
+    for para in paragraphs {
+        for ctrl in &para.controls {
+            if let Control::Shape(sh) = ctrl {
+                let tb = match sh.as_ref() {
+                    ShapeObject::Rectangle(r) => r.drawing.text_box.as_ref(),
+                    _ => None,
+                };
+                if let Some(tb) = tb {
+                    let has_autonum = tb.paragraphs.iter().any(|p| {
+                        p.controls.iter().any(|c| matches!(c, Control::AutoNumber(_)))
+                    });
+                    if has_autonum {
+                        let c = sh.common();
+                        let voff = c.vertical_offset as i32;
+                        let eff = match c.vert_align {
+                            VertAlign::Bottom => paper_height - voff,
+                            VertAlign::Center => paper_height / 2,
+                            _ => voff, // Top/Inside/Outside
+                        };
+                        return Some(eff);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// extra_child_records에서 바탕쪽 LIST_HEADER를 파싱한다.
 ///
 /// LIST_HEADER(tag 66)가 나타나면 바탕쪽으로 파싱.
-/// 바탕쪽 LIST_HEADER 레코드에는 종류(양쪽/홀수/짝수) 필드가 없어 위치로
-/// 추론한다.
-/// - 1~2개: [양쪽] / [양쪽, 홀수].
-/// - 3개(양쪽+홀수+짝수 완전 구성): HWP 는 짝수 바탕쪽을 홀수보다 먼저
-///   기록한다 → [양쪽, 짝수, 홀수]. (MBC 편집본 씬구성표 구역에서 확인:
-///   이 순서라야 홀수 페이지가 하단 footer 바탕쪽을 선택해 한컴독스와 정합.
-///   본문 구역은 2개 구성이라 영향 없음.)
-fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
-    let mut master_pages = Vec::new();
-
+/// 바탕쪽 LIST_HEADER 레코드에는 종류(양쪽/홀수/짝수) 필드가 없다. 그래서
+/// footer(쪽번호) 글상자의 세로위치로 종류를 판별한다 — 한컴은 footer band
+/// 가 위/아래로 갈리는 편집틀(KBS/MBC/SBS 대본 틀)에서 홀수 페이지는 하단
+/// footer, 짝수는 상단 footer 를 쓴다. 따라서 footer 가 가장 낮은(=v_off
+/// 최대) 바탕쪽 = 홀수, 그 다음 = 짝수, 나머지 = 양쪽으로 배정한다.
+/// footer 세로위치 차이가 미미하거나(일반 문서: 홀짝이 가로위치만 다름)
+/// footer 가 2개 미만이면 위치 휴리스틱 [양쪽, 홀수, 짝수]로 폴백한다.
+fn parse_master_pages_from_raw(raw_records: &[RawRecord], paper_height: i32) -> Vec<MasterPage> {
     // RawRecord를 Record로 변환
     let records: Vec<Record> = raw_records
         .iter()
@@ -635,72 +673,100 @@ fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
         .collect();
 
     if list_header_positions.is_empty() {
-        return master_pages;
+        return Vec::new();
     }
 
-    let apply_order: [HeaderFooterApply; 3] = if list_header_positions.len() == 3 {
-        [HeaderFooterApply::Both, HeaderFooterApply::Even, HeaderFooterApply::Odd]
-    } else {
-        [HeaderFooterApply::Both, HeaderFooterApply::Odd, HeaderFooterApply::Even]
-    };
-
+    // 1차: LIST_HEADER 필드 + 문단 파싱 (apply_to 미정)
+    struct Parsed {
+        text_width: u32,
+        text_height: u32,
+        text_ref: u8,
+        num_ref: u8,
+        ext_flags: u16,
+        overlap: bool,
+        paragraphs: Vec<Paragraph>,
+        raw_list_header: Vec<u8>,
+    }
+    let mut parsed: Vec<Parsed> = Vec::new();
     for (mp_idx, &start) in list_header_positions.iter().enumerate() {
-        let apply_to = apply_order.get(mp_idx).copied().unwrap_or(HeaderFooterApply::Both);
-
-        // LIST_HEADER 데이터 파싱
         let list_data = &records[start].data;
         let raw_list_header = list_data.to_vec();
         let mut r = ByteReader::new(list_data);
-
-        // 표준 LIST_HEADER 프리픽스: para_count(2) + attr(4) + width_ref(2) = 8바이트
         let _para_count = r.read_u16().unwrap_or(0);
         let _list_attr = r.read_u32().unwrap_or(0);
         let _width_ref = r.read_u16().unwrap_or(0);
-
-        // 바탕쪽 정보 (표 139, 10바이트)
         let text_width = r.read_u32().unwrap_or(0);
         let text_height = r.read_u32().unwrap_or(0);
         let text_ref = r.read_u8().unwrap_or(0);
         let num_ref = r.read_u8().unwrap_or(0);
-
-        // 영역 0×0 LIST_HEADER는 MEMO/주석 컨트롤의 텍스트 박스가 오분류된 것.
-        // 실제 바탕쪽은 반드시 text_width > 0 || text_height > 0.
+        // 영역 0×0 LIST_HEADER는 MEMO/주석 컨트롤의 텍스트 박스 오분류 — skip.
         if text_width == 0 && text_height == 0 {
             continue;
         }
-
-        // 확장 플래그 (byte 18-19, 표 139 이후)
         let ext_flags = r.read_u16().unwrap_or(0);
-
-        // Task #347: ext_flags 비트로 확장 여부 판별 (bit 1) — 휴리스틱(같은 apply_to 중복)
-        // 단독으로는 ext_flags=0x03 같은 케이스(첫 등록 + 확장 표시)를 놓침.
-        // 비트 + 휴리스틱 OR 조합으로 보강.
         let overlap = ext_flags & 0x01 != 0;
-        let is_extension = (ext_flags & 0x02 != 0)
-            || master_pages.iter().any(|m: &MasterPage| m.apply_to == apply_to);
-
-        // 이 LIST_HEADER에 속하는 문단 레코드 범위 결정
         let end = if mp_idx + 1 < list_header_positions.len() {
             list_header_positions[mp_idx + 1]
         } else {
             records.len()
         };
+        let paragraphs = parse_paragraph_list(&records[start + 1..end]);
+        parsed.push(Parsed {
+            text_width, text_height, text_ref, num_ref, ext_flags, overlap,
+            paragraphs, raw_list_header,
+        });
+    }
 
-        // LIST_HEADER 다음 레코드부터 문단 파싱
-        let para_records = &records[start + 1..end];
-        let paragraphs = parse_paragraph_list(para_records);
+    let n = parsed.len();
+    if n == 0 {
+        return Vec::new();
+    }
 
+    // 2차: apply_to 배정 — footer 세로위치 우선, 미흡 시 위치 휴리스틱.
+    const VOFF_SPREAD_MIN: i32 = 7200; // 1인치 — 상/하단 footer 분리 임계
+    let voffs: Vec<Option<i32>> = parsed.iter()
+        .map(|p| master_footer_voff(&p.paragraphs, paper_height))
+        .collect();
+    let mut with_footer: Vec<(usize, i32)> = voffs.iter()
+        .enumerate()
+        .filter_map(|(i, v)| v.map(|x| (i, x)))
+        .collect();
+    // footer 가 낮은(v_off 큰) 순으로 정렬
+    with_footer.sort_by(|a, b| b.1.cmp(&a.1));
+    let voff_usable = with_footer.len() >= 2
+        && (with_footer[0].1 - with_footer[with_footer.len() - 1].1) >= VOFF_SPREAD_MIN;
+
+    let apply: Vec<HeaderFooterApply> = if voff_usable {
+        let mut a = vec![HeaderFooterApply::Both; n];
+        a[with_footer[0].0] = HeaderFooterApply::Odd;  // 최하단 footer = 홀수
+        a[with_footer[1].0] = HeaderFooterApply::Even; // 차하단 footer = 짝수
+        a
+    } else {
+        (0..n).map(|i| match i {
+            0 => HeaderFooterApply::Both,
+            1 => HeaderFooterApply::Odd,
+            2 => HeaderFooterApply::Even,
+            _ => HeaderFooterApply::Both,
+        }).collect()
+    };
+
+    // 3차: MasterPage 조립 (is_extension 은 apply_to 중복 휴리스틱)
+    let mut master_pages: Vec<MasterPage> = Vec::new();
+    for (i, p) in parsed.into_iter().enumerate() {
+        let apply_to = apply[i];
+        let is_extension = (p.ext_flags & 0x02 != 0)
+            || master_pages.iter().any(|m: &MasterPage| m.apply_to == apply_to);
         master_pages.push(MasterPage {
             apply_to,
             is_extension,
-            overlap,
-            ext_flags,
-            paragraphs,
-            text_width,
-            text_height,
-            text_ref,
-            num_ref,
-            raw_list_header,
+            overlap: p.overlap,
+            ext_flags: p.ext_flags,
+            paragraphs: p.paragraphs,
+            text_width: p.text_width,
+            text_height: p.text_height,
+            text_ref: p.text_ref,
+            num_ref: p.num_ref,
+            raw_list_header: p.raw_list_header,
         });
     }
 
