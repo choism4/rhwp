@@ -2140,14 +2140,19 @@ impl TypesetEngine {
                         // (2022 국립국어원 p31 row 8 케이스). 임계값 25 px 는
                         // synam-001 의 정합 분할 (27.3 px) 과 본 결함 (17.6 px) 사이.
                         const MIN_TOP_KEEP_PX: f64 = 25.0;
-                        if remaining_content <= 0.0
+                        if remaining_content < MIN_SPLIT_CONTENT_PX
                             && avail_content_for_r >= MIN_SPLIT_CONTENT_PX
                         {
-                            // 행 콘텐츠 전체가 잔여 공간에 들어감. find_break_row 가
+                            // 행 콘텐츠 전체가 잔여 공간에 들어가거나, 넘치는 양이
+                            // MIN_SPLIT_CONTENT_PX 미만으로 미미하다. find_break_row 가
                             // row_heights 과대추정으로 행을 제외했으나 실측 content 는
-                            // fit — 통째 포함한다. split_end_limit 에 정밀 content 높이를
-                            // 넣어 partial_height 가 row_heights 과대분 대신 정밀값을
-                            // 쓰게 해 페이지 overflow 를 막는다 (페이지 끝 공백 회귀 차단).
+                            // 사실상 fit — 통째 포함한다. (remaining_content 가 (0,10)
+                            // 구간이면 분할해도 다음 페이지에 <10px 의 무의미한 sliver 만
+                            // 남고, 행을 통째 다음 페이지로 밀면 현재 페이지에 큰 공백이
+                            // 생긴다 — MBC 본문 거대표 p18 dead-zone 결함.)
+                            // split_end_limit 에 정밀 content 높이를 넣어 partial_height 가
+                            // row_heights 과대분 대신 정밀값을 쓰게 해 페이지 overflow 를
+                            // 최소화한다 (페이지 끝 공백 회귀 차단).
                             end_row = r + 1;
                             split_end_limit = total_content.max(MIN_SPLIT_CONTENT_PX);
                         } else if avail_content_for_r >= MIN_SPLIT_CONTENT_PX
