@@ -431,9 +431,30 @@ impl LayoutEngine {
             self.build_header(&mut tree, page_content, header_paragraphs, composed, styles, layout, bin_data_content);
         }
 
+        // 바탕쪽 꼬리말 글상자가 본문 상단을 침범하면(mirror 짝수 페이지 등)
+        // 본문 영역을 그만큼 아래로 옮긴다. 높이는 유지 — 반대편(하단) 여백이
+        // 비어 있어 본문이 그쪽으로 확장된다. 페이지네이션 결과는 불변이고,
+        // 렌더 시 본문 블록 시작 y 만 내려가 한컴 편집기처럼 꼬리말 아래
+        // 여백을 확보한다. 페이지 테두리·바탕쪽·머리말은 원래 layout 유지.
+        let footer_reserve_px = Self::master_top_overlap_reserve_px(
+            active_master_page, layout.body_area.y, layout.page_height, layout.dpi,
+        );
+        let body_layout_owned;
+        let body_layout: &PageLayoutInfo = if footer_reserve_px > 0.0 {
+            let mut l = layout.clone();
+            l.body_area.y += footer_reserve_px;
+            for ca in &mut l.column_areas {
+                ca.y += footer_reserve_px;
+            }
+            body_layout_owned = l;
+            &body_layout_owned
+        } else {
+            layout
+        };
+
         // 본문 영역 노드 (clip_rect은 콘텐츠 레이아웃 후 확정)
         let body_id = tree.next_id();
-        let body_bbox = layout_rect_to_bbox(&layout.body_area);
+        let body_bbox = layout_rect_to_bbox(&body_layout.body_area);
         let mut body_node = RenderNode::new(
             body_id,
             RenderNodeType::Body {
@@ -447,12 +468,12 @@ impl LayoutEngine {
         self.build_columns(
             &mut tree, &mut body_node, &mut paper_images,
             page_content, paragraphs, composed, styles,
-            bin_data_content, measured_tables, layout, outline_numbering_id,
+            bin_data_content, measured_tables, body_layout, outline_numbering_id,
             wrap_around_paras,
         );
 
         // 단 구분선
-        self.build_column_separators(&mut tree, &mut body_node, layout);
+        self.build_column_separators(&mut tree, &mut body_node, body_layout);
 
         // 콘텐츠 레이아웃 후 clip_rect 확정:
         // 자식 노드(표 등)의 실제 바운딩 박스를 재귀적으로 반영하여
@@ -780,6 +801,56 @@ impl LayoutEngine {
     }
 
     /// 바탕쪽 영역 노드를 생성하여 tree에 추가한다.
+    /// 바탕쪽 글상자가 본문 영역 상단을 침범하는 양(px)을 구한다.
+    ///
+    /// mirror 레이아웃의 짝수 페이지는 쪽번호 꼬리말 글상자가 페이지 상단에
+    /// 배치돼 본문 표/텍스트와 겹친다. 한컴 편집기는 상단 꼬리말 아래에
+    /// 여백을 확보하므로, 침범량만큼 본문 영역을 아래로 옮기기 위한 값.
+    /// 침범 글상자가 없으면 0.0 — 일반 문서·홀수 페이지는 불변.
+    fn master_top_overlap_reserve_px(
+        master: Option<&MasterPage>,
+        body_area_y_px: f64,
+        page_height_px: f64,
+        dpi: f64,
+    ) -> f64 {
+        let mp = match master {
+            Some(m) => m,
+            None => return 0.0,
+        };
+        let body_y = super::px_to_hwpunit(body_area_y_px, dpi);
+        let paper_h = super::px_to_hwpunit(page_height_px, dpi);
+        // 침범 밴드는 얇다(꼬리말 한 줄). 본문 높이의 1/4 를 넘으면 전면 배경
+        // 도형 등으로 보고 무시 — 오검출 방지.
+        let max_band = paper_h / 4;
+        let mut deepest = body_y;
+        for para in &mp.paragraphs {
+            for ctrl in &para.controls {
+                if let Control::Shape(shape) = ctrl {
+                    let c = shape.common();
+                    if c.vert_rel_to != crate::model::shape::VertRelTo::Paper {
+                        continue;
+                    }
+                    let v_off = c.vertical_offset as i32;
+                    let v_h = c.height as i32;
+                    let top: i32 = match c.vert_align {
+                        crate::model::shape::VertAlign::Top => v_off,
+                        crate::model::shape::VertAlign::Bottom => paper_h - v_off - v_h,
+                        _ => continue,
+                    };
+                    let bottom = top + v_h;
+                    if top < body_y && bottom > body_y && (bottom - body_y) <= max_band {
+                        deepest = deepest.max(bottom);
+                    }
+                }
+            }
+        }
+        if deepest > body_y {
+            super::hwpunit_to_px(deepest - body_y, dpi)
+        } else {
+            0.0
+        }
+    }
+
     fn build_master_page(
         &self,
         tree: &mut PageRenderTree,
