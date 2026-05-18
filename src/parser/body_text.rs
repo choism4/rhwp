@@ -600,7 +600,13 @@ fn parse_section_def(ctrl_data: &[u8], child_records: &[Record]) -> SectionDef {
 /// extra_child_records에서 바탕쪽 LIST_HEADER를 파싱한다.
 ///
 /// LIST_HEADER(tag 66)가 나타나면 바탕쪽으로 파싱.
-/// 순서: 1번째=양쪽(Both), 2번째=홀수(Odd), 3번째=짝수(Even)
+/// 바탕쪽 LIST_HEADER 레코드에는 종류(양쪽/홀수/짝수) 필드가 없어 위치로
+/// 추론한다.
+/// - 1~2개: [양쪽] / [양쪽, 홀수].
+/// - 3개(양쪽+홀수+짝수 완전 구성): HWP 는 짝수 바탕쪽을 홀수보다 먼저
+///   기록한다 → [양쪽, 짝수, 홀수]. (MBC 편집본 씬구성표 구역에서 확인:
+///   이 순서라야 홀수 페이지가 하단 footer 바탕쪽을 선택해 한컴독스와 정합.
+///   본문 구역은 2개 구성이라 영향 없음.)
 fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
     let mut master_pages = Vec::new();
 
@@ -632,7 +638,11 @@ fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
         return master_pages;
     }
 
-    let apply_order = [HeaderFooterApply::Both, HeaderFooterApply::Odd, HeaderFooterApply::Even];
+    let apply_order: [HeaderFooterApply; 3] = if list_header_positions.len() == 3 {
+        [HeaderFooterApply::Both, HeaderFooterApply::Even, HeaderFooterApply::Odd]
+    } else {
+        [HeaderFooterApply::Both, HeaderFooterApply::Odd, HeaderFooterApply::Even]
+    };
 
     for (mp_idx, &start) in list_header_positions.iter().enumerate() {
         let apply_to = apply_order.get(mp_idx).copied().unwrap_or(HeaderFooterApply::Both);
