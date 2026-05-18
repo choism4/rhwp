@@ -1189,6 +1189,71 @@ impl DocumentCore {
         Ok(super::super::helpers::json_ok())
     }
 
+    /// 표 전 셀 문단의 LineSeg.line_height 가 글꼴 크기보다 작으면 글꼴 크기로
+    /// 교정한다.
+    ///
+    /// `replaceCellText`(insertTextInCell→reflow_line_segs) 가 씬구성표 셀에
+    /// 글꼴(예: 12pt=1200)과 어긋난 line_height(400 등)를 남길 때가 있다.
+    /// 렌더 시 `corrected_line_height` 가 `raw_lh < max_fs` 를 보고 줄 높이를
+    /// `글꼴×줄간격%` 로 과대 산출해(160% → 글꼴의 1.6배) 행이 한 행씩
+    /// 커지고, 씬구성표 표가 페이지당 한 행 적게 들어간다(넘침).
+    /// line_height 를 글꼴 크기 이상으로 맞춰 corrected_line_height 의 정상
+    /// 분기를 타게 한다. 이미 정상(line_height ≥ 글꼴)인 셀은 불변.
+    pub fn fix_table_cell_line_heights_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+    ) -> Result<String, HwpError> {
+        let char_sizes: Vec<i32> = self
+            .document
+            .doc_info
+            .char_shapes
+            .iter()
+            .map(|cs| cs.base_size as i32)
+            .collect();
+        let table = match self
+            .document
+            .sections
+            .get_mut(section_idx)
+            .and_then(|s| s.paragraphs.get_mut(parent_para_idx))
+            .and_then(|p| p.controls.get_mut(control_idx))
+        {
+            Some(Control::Table(t)) => t,
+            _ => return Err(HwpError::RenderError(format!(
+                "표 없음: s{section_idx} p{parent_para_idx} c{control_idx}"
+            ))),
+        };
+        for cell in &mut table.cells {
+            for para in &mut cell.paragraphs {
+                let fs = para
+                    .char_shapes
+                    .iter()
+                    .filter_map(|r| char_sizes.get(r.char_shape_id as usize).copied())
+                    .max()
+                    .unwrap_or(0);
+                if fs <= 0 {
+                    continue;
+                }
+                let mut v = para.line_segs.first().map(|ls| ls.vertical_pos).unwrap_or(0);
+                for ls in &mut para.line_segs {
+                    if ls.line_height < fs {
+                        ls.line_height = fs;
+                        if ls.text_height < fs {
+                            ls.text_height = fs;
+                        }
+                    }
+                    ls.vertical_pos = v;
+                    v += ls.line_height + ls.line_spacing;
+                }
+            }
+        }
+        table.dirty = true;
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        Ok(super::super::helpers::json_ok())
+    }
+
     /// 셀 내부 문단 병합 (네이티브 에러 타입)
     ///
     /// cell_para_idx 문단을 이전 문단(cell_para_idx - 1)에 병합한다.

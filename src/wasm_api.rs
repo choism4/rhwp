@@ -4783,6 +4783,20 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 표 셀 문단의 LineSeg.line_height 가 글꼴보다 작으면 글꼴 크기로 교정.
+    /// 씬구성표 셀이 편집 후 글꼴과 어긋난 line_height 를 가져 렌더 시 행이
+    /// 과대 산출되는 것을 막는다.
+    #[wasm_bindgen(js_name = fixTableCellLineHeights)]
+    pub fn fix_table_cell_line_heights(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+    ) -> Result<String, JsValue> {
+        self.fix_table_cell_line_heights_native(sec_idx, parent_para_idx, control_idx)
+            .map_err(|e| e.into())
+    }
+
     /// 글자 서식을 적용한다 (셀 내 문단).
     #[wasm_bindgen(js_name = applyCharFormatInCell)]
     pub fn apply_char_format_in_cell(
