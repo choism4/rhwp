@@ -1123,6 +1123,34 @@ impl DocumentCore {
         self.reflow_cell_paragraph(section_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx);
         self.reflow_cell_paragraph(section_idx, parent_para_idx, control_idx, cell_idx, new_cell_para_idx);
 
+        // split_at 은 원본·신규 문단의 LineSeg.vertical_pos 를 0 으로 리셋한다
+        // (`..Default::default()`). reflow_line_segs 는 첫 LineSeg vpos 를 보존만
+        // 하므로, 셀 내 문단 간 vpos 누적이 끊겨 모든 문단이 0 에서 시작 → 렌더 시
+        // 줄이 겹쳐 보이는 압축. cell_para_idx 부터 vpos 를 순차 재누적한다.
+        {
+            use crate::renderer::composer::recalculate_section_vpos;
+            match self.document.sections[section_idx]
+                .paragraphs[parent_para_idx].controls.get_mut(control_idx)
+            {
+                Some(Control::Table(table)) => {
+                    if let Some(cell) = table.cells.get_mut(cell_idx) {
+                        recalculate_section_vpos(&mut cell.paragraphs, cell_para_idx);
+                    }
+                }
+                Some(Control::Shape(shape)) => {
+                    if let Some(tb) = super::super::helpers::get_textbox_from_shape_mut(shape) {
+                        recalculate_section_vpos(&mut tb.paragraphs, cell_para_idx);
+                    }
+                }
+                Some(Control::Picture(pic)) => {
+                    if let Some(ref mut cap) = pic.caption {
+                        recalculate_section_vpos(&mut cap.paragraphs, cell_para_idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // raw 스트림 무효화, section dirty, 재페이지네이션
         self.document.sections[section_idx].raw_stream = None;
         self.mark_section_dirty(section_idx);
