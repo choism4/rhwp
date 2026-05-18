@@ -4770,6 +4770,19 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 단락의 LineSeg.vertical_pos 를 0 기준으로 재설정한다.
+    /// 페이지를 새로 시작하는 단락(예: 씬구성표)이 편집 후 누적 vpos 를
+    /// 가져 렌더 시 본문이 밀리는 것을 막는다.
+    #[wasm_bindgen(js_name = resetParagraphVpos)]
+    pub fn reset_paragraph_vpos(
+        &mut self,
+        sec_idx: usize,
+        para_idx: usize,
+    ) -> Result<String, JsValue> {
+        self.reset_paragraph_vpos_native(sec_idx, para_idx)
+            .map_err(|e| e.into())
+    }
+
     /// 글자 서식을 적용한다 (셀 내 문단).
     #[wasm_bindgen(js_name = applyCharFormatInCell)]
     pub fn apply_char_format_in_cell(

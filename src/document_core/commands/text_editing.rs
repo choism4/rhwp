@@ -1160,6 +1160,35 @@ impl DocumentCore {
         Ok(super::super::helpers::json_ok_with(&format!("\"cellParaIndex\":{},\"charOffset\":0", new_cell_para_idx)))
     }
 
+    /// 단락의 LineSeg.vertical_pos 를 0 기준으로 재설정한다.
+    ///
+    /// 편집(앞 단락 삭제·추가)으로 vpos 가 페이지 경계를 넘어 누적되면, 페이지
+    /// 첫 단락이 0 이 아닌 vpos 를 가져 렌더 시 본문이 아래로 밀린다(예: 씬구성표
+    /// 표가 페이지당 한 행 적게 들어감). 한컴은 페이지 경계에서 vpos 를 0 으로
+    /// 저장한다. 페이지를 새로 시작하는 단락에 한해 호출해 같은 상태로 맞춘다.
+    pub fn reset_paragraph_vpos_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+    ) -> Result<String, HwpError> {
+        let para = self
+            .document
+            .sections
+            .get_mut(section_idx)
+            .and_then(|s| s.paragraphs.get_mut(para_idx))
+            .ok_or_else(|| HwpError::RenderError(format!(
+                "문단 없음: s{section_idx} p{para_idx}"
+            )))?;
+        let mut v: i32 = 0;
+        for ls in &mut para.line_segs {
+            ls.vertical_pos = v;
+            v += ls.line_height + ls.line_spacing;
+        }
+        self.document.sections[section_idx].raw_stream = None;
+        self.mark_section_dirty(section_idx);
+        Ok(super::super::helpers::json_ok())
+    }
+
     /// 셀 내부 문단 병합 (네이티브 에러 타입)
     ///
     /// cell_para_idx 문단을 이전 문단(cell_para_idx - 1)에 병합한다.
