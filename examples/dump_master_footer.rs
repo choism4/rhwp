@@ -34,6 +34,14 @@ fn walk_shape(s: &ShapeObject, indent: &str, doc: &Document) {
     };
     println!("{}{} v_off={} h_off={} h={} w={}",
         indent, kind, c.vertical_offset, c.horizontal_offset, c.height, c.width);
+    if let Some(d) = s.drawing() {
+        let sa = &d.shape_attr;
+        println!(
+            "{}  xform rot={} flip=({},{}) matrix=[sx={} b={} tx={} c={} sy={} ty={}]",
+            indent, sa.rotation_angle, sa.horz_flip, sa.vert_flip,
+            sa.render_sx, sa.render_b, sa.render_tx, sa.render_c, sa.render_sy, sa.render_ty
+        );
+    }
     if let ShapeObject::Group(g) = s {
         for child in &g.children {
             walk_shape(child, &format!("{}  ", indent), doc);
