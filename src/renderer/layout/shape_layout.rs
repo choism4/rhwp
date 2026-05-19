@@ -1340,6 +1340,58 @@ impl LayoutEngine {
                                 }
                             }
                         }
+                        // 폴백: \u{0015}·공백전용 run 이 모두 없을 때 — 한컴독스 웹
+                        // export 가 char-shape 를 병합해 페이지번호 placeholder("-   -")
+                        // 가 단일 run 으로 합쳐진 경우. run 내부의 공백 구간(앞뒤로
+                        // 비공백이 있는)을 page_str 로 치환한다. placeholder run 의
+                        // char_shape 가 대시용 굵은 모양이면 숫자가 볼드로 찍히므로,
+                        // 같은 문단의 비볼드 char_shape(= AutoNumber 본래 모양)를
+                        // 찾아 숫자 run 에만 적용한다.
+                        if !done {
+                            let num_style: Option<u32> = para.char_shapes.iter()
+                                .find(|cs| styles.char_styles
+                                    .get(cs.char_shape_id as usize)
+                                    .map(|c| !c.bold)
+                                    .unwrap_or(false))
+                                .map(|cs| cs.char_shape_id);
+                            'fallback: for line in &mut comp.lines {
+                                let mut split: Option<(usize, String, String)> = None;
+                                for (ri, run) in line.runs.iter().enumerate() {
+                                    let chars: Vec<char> = run.text.chars().collect();
+                                    let first = chars.iter().position(|c| !c.is_whitespace());
+                                    let last = chars.iter().rposition(|c| !c.is_whitespace());
+                                    if let (Some(first), Some(last)) = (first, last) {
+                                        if let Some(ws) =
+                                            (first + 1..last).find(|&i| chars[i].is_whitespace())
+                                        {
+                                            let mut we = ws;
+                                            while we < last && chars[we].is_whitespace() {
+                                                we += 1;
+                                            }
+                                            let prefix: String = chars[..ws].iter().collect();
+                                            let suffix: String = chars[we..].iter().collect();
+                                            split = Some((ri, prefix, suffix));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some((ri, prefix, suffix)) = split {
+                                    let base = line.runs[ri].clone();
+                                    let mut pre = base.clone();
+                                    pre.text = format!("{} ", prefix);
+                                    let mut mid = base.clone();
+                                    mid.text = page_str.clone();
+                                    if let Some(ns) = num_style {
+                                        mid.char_style_id = ns;
+                                    }
+                                    let mut suf = base.clone();
+                                    suf.text = format!(" {}", suffix);
+                                    line.runs.splice(ri..=ri, [pre, mid, suf]);
+                                    done = true;
+                                    break 'fallback;
+                                }
+                            }
+                        }
                         let _ = done;
                     }
                 }

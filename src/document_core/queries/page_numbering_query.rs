@@ -147,6 +147,84 @@ impl DocumentCore {
 
         Ok(format!(r#"{{"ok":true,"updated":{}}}"#, updated))
     }
+
+    /// 바탕쪽 LIST_HEADER 의 ext_flags(데이터 byte 18) 에서 overlap(0x01)·
+    /// is_extension(0x02) 비트를 클리어한다.
+    ///
+    /// 웹 한컴독스로 편집한 골격 템플릿은 정규 바탕쪽(Odd/Even)을 확장 바탕쪽으로
+    /// 잘못 표시한다. `rendering.rs` 의 master 선택은 `!is_extension` 인 것만
+    /// 정규 패리티 master 로 잡으므로, 확장 표시된 Odd 바탕쪽은 홀수 본문
+    /// 페이지에서 선택되지 않아 footer(쪽번호·작품명 글상자)가 통째로 소실된다.
+    /// 바탕쪽은 raw 레코드로 직렬화되므로 `extra_child_records` 를 직접 패치한다.
+    pub fn clear_master_page_ext_flags(&mut self, sec: usize) -> Result<String, HwpError> {
+        let section = self.document.sections.get_mut(sec)
+            .ok_or_else(|| HwpError::RenderError("구역 범위 초과".into()))?;
+
+        let mut patched: u32 = 0;
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    patched += clear_ext_flags_in_records(&mut sd.extra_child_records);
+                }
+            }
+        }
+        patched += clear_ext_flags_in_records(&mut section.section_def.extra_child_records);
+
+        // 모델 미러 (in-memory 렌더 경로).
+        for mp in section.section_def.master_pages.iter_mut() {
+            mp.is_extension = false;
+            mp.overlap = false;
+            mp.ext_flags &= !0x03;
+        }
+        for para in section.paragraphs.iter_mut() {
+            for ctrl in para.controls.iter_mut() {
+                if let Control::SectionDef(sd) = ctrl {
+                    for mp in sd.master_pages.iter_mut() {
+                        mp.is_extension = false;
+                        mp.overlap = false;
+                        mp.ext_flags &= !0x03;
+                    }
+                }
+            }
+        }
+
+        if patched > 0 {
+            section.raw_stream = None;
+        }
+        Ok(format!(r#"{{"ok":true,"patched":{}}}"#, patched))
+    }
+}
+
+/// 바탕쪽 최상위 LIST_HEADER 레코드의 ext_flags(byte 18) 에서 0x03 비트를 클리어.
+/// top-level = LIST_HEADER 최소 level — 하위 level 은 도형 내부 텍스트박스다
+/// (`parse_master_pages_from_raw` 와 동일 규칙).
+fn clear_ext_flags_in_records(records: &mut [crate::model::document::RawRecord]) -> u32 {
+    use crate::parser::tags;
+    let top_level = records.iter()
+        .filter(|r| r.tag_id == tags::HWPTAG_LIST_HEADER)
+        .map(|r| r.level)
+        .min();
+    let Some(top_level) = top_level else { return 0; };
+    let mut count = 0;
+    for rec in records.iter_mut() {
+        if rec.tag_id != tags::HWPTAG_LIST_HEADER || rec.level != top_level {
+            continue;
+        }
+        if rec.data.len() < 20 {
+            continue;
+        }
+        // text_width(8..12)·text_height(12..16) 0×0 = MEMO 텍스트박스 — skip.
+        let tw = u32::from_le_bytes([rec.data[8], rec.data[9], rec.data[10], rec.data[11]]);
+        let th = u32::from_le_bytes([rec.data[12], rec.data[13], rec.data[14], rec.data[15]]);
+        if tw == 0 && th == 0 {
+            continue;
+        }
+        if rec.data[18] & 0x03 != 0 {
+            rec.data[18] &= !0x03;
+            count += 1;
+        }
+    }
+    count
 }
 
 fn update_paragraph(para: &mut crate::model::paragraph::Paragraph, format: u8) -> u32 {
