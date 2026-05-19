@@ -295,23 +295,23 @@ fn inject_footnote_markers(lines: &mut [ComposedLine], positions: &[(usize, u16)
 /// 문단의 텍스트를 줄별로 분할하고, 각 줄 내에서 CharShapeRef 경계에 따라 분할한다.
 fn compose_lines(para: &Paragraph) -> Vec<ComposedLine> {
     if para.line_segs.is_empty() {
-        // LineSeg가 없으면 전체 텍스트를 하나의 줄로
+        // LineSeg가 없으면 전체 텍스트를 하나의 줄로.
+        // char_shapes.first() 를 전체에 일괄 적용하면 안 된다 — 바탕쪽 통합
+        // footer 글상자처럼 한 문단에 여러 char_shape(쪽번호 마커 + 작품명)가
+        // 섞인 경우 작품명이 마커 char_shape(굵은 바탕·장평 200%)를 잘못
+        // 상속한다. split_by_char_shapes 로 char_shape 경계대로 분할한다.
         if para.text.is_empty() {
             return Vec::new();
         }
-        let default_style_id = para
-            .char_shapes
-            .first()
-            .map(|cs| cs.char_shape_id)
-            .unwrap_or(0);
+        let char_count = para.text.chars().count();
         return vec![ComposedLine {
-            runs: split_runs_by_lang(vec![ComposedTextRun {
-                text: para.text.clone(),
-                char_style_id: default_style_id,
-                lang_index: 0,
-                char_overlap: None,
-                    footnote_marker: None,
-                    display_text: None,            }]),
+            runs: split_by_char_shapes(
+                &para.text,
+                0,
+                char_count,
+                &para.char_offsets,
+                &para.char_shapes,
+            ),
             line_height: 400,
             baseline_distance: 320,
             segment_width: 0,
