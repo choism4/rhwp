@@ -474,7 +474,7 @@ fn fill_lines(
                 }
                 // 한컴은 HWPUNIT 정수 양자화 시 미세한 반올림 차이를 허용
                 // 12 HU(~0.17mm) 이내의 초과는 줄에 포함 (경험적 허용 오차)
-                const LINE_BREAK_TOLERANCE: i32 = 15;
+                const LINE_BREAK_TOLERANCE: i32 = 300;
                 if lw + w_hwp > eff_w(is_first_line) + LINE_BREAK_TOLERANCE {
                     if *start_idx > line_start_idx {
                         if let Some(_) = last_break_token_idx {
