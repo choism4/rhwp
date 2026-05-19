@@ -50,6 +50,8 @@ fn walk_shape(s: &ShapeObject, indent: &str, doc: &Document) {
     }
     if let Some(d) = s.drawing() {
         if let Some(tb) = &d.text_box {
+            println!("{}  TEXTBOX list_attr=0x{:08X} text_dir={} valign={:?}",
+                indent, tb.list_attr, tb.list_attr & 0x07, tb.vertical_align);
             for (pi, para) in tb.paragraphs.iter().enumerate() {
                 let txt: String = para.text.chars().take(40).collect();
                 if !txt.trim().is_empty() || para.text.chars().any(|c| (c as u32) < 0x20) {
