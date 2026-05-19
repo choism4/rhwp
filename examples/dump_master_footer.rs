@@ -15,8 +15,9 @@ fn dump_char_shapes(para: &Paragraph, indent: &str, doc: &Document) {
                 .map(|f| f.name.as_str())
                 .unwrap_or("?");
             println!(
-                "{}  charshape@{} id={} bold={} italic={} base_size={} font={:?}",
-                indent, cs.start_pos, id, shape.bold, shape.italic, shape.base_size, font
+                "{}  charshape@{} id={} bold={} italic={} base_size={} font={:?} ratios={:?} spacings={:?} rel_sizes={:?}",
+                indent, cs.start_pos, id, shape.bold, shape.italic, shape.base_size, font,
+                shape.ratios, shape.spacings, shape.relative_sizes
             );
         }
     }
