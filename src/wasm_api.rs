@@ -1457,6 +1457,27 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 표 셀 내 문단의 line_segs 개수를 반환 (wrap 판정용).
+    #[wasm_bindgen(js_name = getCellParagraphLineSegCount)]
+    pub fn get_cell_paragraph_line_seg_count(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+    ) -> Result<u32, JsValue> {
+        self.get_cell_paragraph_line_seg_count_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            cell_para_idx as usize,
+        )
+        .map(|v| v as u32)
+        .map_err(|e| e.into())
+    }
+
     /// 표 셀 내 문단의 글자 수를 반환한다.
     #[wasm_bindgen(js_name = getCellParagraphLength)]
     pub fn get_cell_paragraph_length(

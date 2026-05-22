@@ -729,7 +729,8 @@ impl DocumentCore {
             cell_para.apply_char_shape_range(start_offset, end_offset, new_id);
         }
 
-        // 글꼴 크기 변경 시 셀 내 LineSeg 재계산
+        // base_size 변경 시 line_height·baseline 갱신용 reflow — 기존 동작 유지.
+        // available_width 는 페이지 column width (기존 로직 보존, 본문 cell 회귀 차단).
         if mods.base_size.is_some() {
             let dpi = self.dpi;
             let styles = resolve_styles(&self.document.doc_info, dpi);
@@ -749,6 +750,35 @@ impl DocumentCore {
             reflow_line_segs(cell_para, available_width, &styles, dpi);
 
             // 표 dirty 마킹 — 셀 높이 재계산 필요
+            if let Control::Table(ref mut t) = self.document.sections[sec_idx]
+                .paragraphs[parent_para_idx].controls[control_idx]
+            {
+                t.dirty = true;
+            }
+        }
+
+        // 장평(ratios) / 자간(spacings) 변경 시 — 셀 inner_width 기준 reflow.
+        // 가로 stretch 가 wrap 판정에 영향 → 셀 폭 기준으로 측정해야 실제 렌더와 일치.
+        // base_size 와 분리 — 본문 cell 의 fontSize 호출은 기존(column width) 경로 유지.
+        if mods.ratios.is_some() || mods.spacings.is_some() {
+            let dpi = self.dpi;
+            let styles = resolve_styles(&self.document.doc_info, dpi);
+            let (cell_w_hu, pad_l_hu, pad_r_hu) = {
+                let table_ref = if let Control::Table(ref t) = self.document.sections[sec_idx]
+                    .paragraphs[parent_para_idx].controls[control_idx] { t } else {
+                    return Err(HwpError::RenderError("표가 아님".to_string()));
+                };
+                let cell = table_ref.cells.get(cell_idx)
+                    .ok_or_else(|| HwpError::RenderError(format!("셀 {} 범위 초과", cell_idx)))?;
+                (cell.width as i32, cell.padding.left as i32, cell.padding.right as i32)
+            };
+            let cell_w_px = crate::renderer::hwpunit_to_px(cell_w_hu, dpi);
+            let pad_l_px = crate::renderer::hwpunit_to_px(pad_l_hu, dpi);
+            let pad_r_px = crate::renderer::hwpunit_to_px(pad_r_hu, dpi);
+            let inner_width = (cell_w_px - pad_l_px - pad_r_px).max(1.0);
+            let cell_para = self.get_cell_paragraph_mut(sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx)?;
+            reflow_line_segs(cell_para, inner_width, &styles, dpi);
+
             if let Control::Table(ref mut t) = self.document.sections[sec_idx]
                 .paragraphs[parent_para_idx].controls[control_idx]
             {

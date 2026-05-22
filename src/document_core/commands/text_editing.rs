@@ -1800,6 +1800,24 @@ impl DocumentCore {
         Ok(cell_para.text.chars().count())
     }
 
+    /// 셀 내 문단의 line_segs 개수를 반환 (wrap 판정용).
+    pub fn get_cell_paragraph_line_seg_count_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+    ) -> Result<usize, HwpError> {
+        let cell_para = self.get_cell_paragraph_ref(
+            section_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx,
+        ).ok_or_else(|| HwpError::RenderError(format!(
+            "셀 문단 접근 실패: sec={}, para={}, ctrl={}, cell={}, cellPara={}",
+            section_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx
+        )))?;
+        Ok(cell_para.line_segs.len())
+    }
+
     /// 셀 내 텍스트 부분 추출 (네이티브)
     pub fn get_text_in_cell_native(
         &self,
