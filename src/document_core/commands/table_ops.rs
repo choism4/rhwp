@@ -373,6 +373,54 @@ impl DocumentCore {
         ))
     }
 
+    /// 표 셀 paragraphs 의 line_segs 를 셀 inner_width 기준으로 재배치한다.
+    ///
+    /// 사용처: 빈 line_segs(템플릿 HWP 가 Hancom 미경유 직접 생성된 경우)를
+    /// 텍스트 본문 기준으로 채워, renderer 의 valign·vpos 분기가 정상 동작하도록.
+    /// 씬구성표 헤더 행이 대표 사례 — 데이터 행은 replaceCellText 가 reflow 하지만
+    /// 헤더 행은 template text 그대로 유지되어 line_segs 가 비어 있음.
+    ///
+    /// 반환: JSON `{"ok":true,"reflowed":N}`
+    pub(crate) fn reflow_cell_line_segs_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::renderer::composer::reflow_line_segs;
+        use crate::renderer::style_resolver::resolve_styles;
+        // styles 는 self.styles 와 동일 결과 — &self.styles 와 &mut self.get_table_mut
+        // 의 borrow 충돌 회피용 별도 인스턴스. doc_info 기반이라 재계산 비용 무시 가능.
+        let styles = resolve_styles(&self.document.doc_info, self.dpi);
+        let dpi = self.dpi;
+
+        let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+        let cell = table.cells.get_mut(cell_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+
+        let cell_w_px = crate::renderer::hwpunit_to_px(cell.width as i32, dpi);
+        let pad_left = crate::renderer::hwpunit_to_px(cell.padding.left as i32, dpi);
+        let pad_right = crate::renderer::hwpunit_to_px(cell.padding.right as i32, dpi);
+        let inner_width = (cell_w_px - pad_left - pad_right).max(1.0);
+
+        let mut reflowed = 0usize;
+        for para in cell.paragraphs.iter_mut() {
+            // !text.is_empty() && line_segs.is_empty() — 템플릿 직생성 셀 케이스.
+            if !para.text.is_empty() && para.line_segs.is_empty() {
+                reflow_line_segs(para, inner_width, &styles, dpi);
+                reflowed += 1;
+            }
+        }
+
+        if reflowed > 0 {
+            self.document.sections[section_idx].raw_stream = None;
+            self.recompose_section(section_idx);
+            self.paginate_if_needed();
+        }
+        Ok(format!("{{\"ok\":true,\"reflowed\":{}}}", reflowed))
+    }
+
     /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`

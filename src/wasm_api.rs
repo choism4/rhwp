@@ -1948,6 +1948,30 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 표 셀 paragraphs 의 line_segs 를 셀 inner_width 기준으로 채운다.
+    ///
+    /// 사용: 빈 line_segs(템플릿 HWP 가 Hancom 미경유 직접 생성) 를 본문 기준으로
+    /// reflow → renderer 의 valign Center 분기에서 정상 vpos/lh 계산.
+    /// 씬구성표 헤더 행 (S#·장 소·PAGE) 의 텍스트 상단 클리핑 + 행 visual 1.6× 결함
+    /// 의 surgical fix. 데이터 행은 replaceCellText 가 이미 reflow.
+    /// 반환: JSON `{"ok":true,"reflowed":N}`
+    #[wasm_bindgen(js_name = reflowCellLineSegs)]
+    pub fn reflow_cell_line_segs(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.reflow_cell_line_segs_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 여러 셀의 width/height를 한 번에 조절한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
