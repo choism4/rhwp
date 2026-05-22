@@ -930,6 +930,18 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 구역의 바탕쪽 LIST_HEADER ext_flags 에서 overlap(0x01) + is_extension(0x02)
+    /// 비트를 클리어. 웹 한컴독스가 정규 바탕쪽을 확장 바탕쪽으로 잘못 표시한
+    /// 회귀를 고친다 — `is_extension=true` 마스터는 section 마지막 페이지에만
+    /// 적용되어 첫 씬구성표 페이지의 페이지번호 마커가 소실되는 결함 fix.
+    ///
+    /// 반환: JSON `{"ok":true,"patched":N}`
+    #[wasm_bindgen(js_name = clearMasterPageExtFlags)]
+    pub fn clear_master_page_ext_flags_js(&mut self, section_idx: u32) -> Result<String, JsValue> {
+        self.core.clear_master_page_ext_flags(section_idx as usize)
+            .map_err(|e| e.into())
+    }
+
     /// 구역의 바탕쪽(master page) 텍스트를 find-and-replace 한다.
     ///
     /// 반환: JSON `{"ok":true,"replaced":N}`
