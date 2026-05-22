@@ -1154,6 +1154,16 @@ impl DocumentCore {
                 para.char_count = new_char_count;
                 para.char_offsets = new_offsets;
                 para.line_segs.clear();
+                // 2026-05-21 사용자 r30-ext 피드백 (KBS footer '제' 글자 비대화):
+                // text 길이가 변하면 char_shapes start_pos 가 옛 위치 기준으로
+                // 남아 일부 글자가 의도와 다른 shape 를 받는다. baseline footer 는
+                // 단일 폰트이므로 첫 항목 하나로 정규화 (start_pos=0).
+                if para.char_shapes.len() > 1 {
+                    para.char_shapes.truncate(1);
+                }
+                if let Some(first) = para.char_shapes.first_mut() {
+                    first.start_pos = 0;
+                }
                 count += 1;
             }
             // 안에 Footer/Header/Table cells/Shape 글상자 nested paragraphs 재귀 sync.
