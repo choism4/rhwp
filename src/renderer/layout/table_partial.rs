@@ -1167,6 +1167,29 @@ impl LayoutEngine {
             table_node.children.push(cell_node);
         }
 
+        // 페이지 분할 연속 지점의 가로 보더 제거 (피드백 v2 #4 — 지문이 페이지를
+        // 넘어 분할될 때 사이에 인위적 가로선/밑줄이 그려지는 문제).
+        //   - split_start_content_offset>0 : 첫 행이 앞 페이지에서 이어진 연속 행 →
+        //     상단 가로 엣지(h_edges[0])는 페이지 맨 위에 그려지는 인위적 선.
+        //   - split_end_content_limit>0 : 마지막 행이 다음 페이지로 잘린 행 →
+        //     하단 가로 엣지(h_edges.last())는 페이지 맨 아래에 그려지는 인위적 선.
+        // 외곽선·정상 행 경계선은 분할이 아닌 경우(offset/limit=0) 보존된다.
+        // 세로 엣지(v_edges)는 건드리지 않아 컬럼 구분선은 이어진다.
+        if split_start_content_offset > 0.0 {
+            if let Some(first) = h_edges.first_mut() {
+                for slot in first.iter_mut() {
+                    *slot = None;
+                }
+            }
+        }
+        if split_end_content_limit > 0.0 {
+            if let Some(last) = h_edges.last_mut() {
+                for slot in last.iter_mut() {
+                    *slot = None;
+                }
+            }
+        }
+
         // 엣지 기반 테두리 렌더링
         table_node.children.extend(render_edge_borders(
             tree, &h_edges, &v_edges, &row_col_x, &grid_row_y, table_x, table_y,
