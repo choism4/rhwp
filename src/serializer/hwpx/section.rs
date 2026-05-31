@@ -24,6 +24,7 @@ use quick_xml::Writer;
 use crate::model::control::{Control, Equation};
 use crate::model::footnote::{Footnote, Endnote};
 use crate::model::document::{Document, Section};
+use crate::model::page::PageDef;
 use crate::model::paragraph::{ColumnBreakType, LineSeg, Paragraph};
 use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertAlign, VertRelTo};
 
@@ -33,6 +34,9 @@ use super::utils::xml_escape;
 use super::SerializeError;
 
 const EMPTY_SECTION_XML: &str = include_str!("templates/empty_section0.xml");
+// 템플릿(empty_section0.xml)에 하드코딩된 정적 pagePr — A4 세로 + HWP 기본 여백.
+// write_section 에서 실제 PageDef 로 교체한다 (피드백 v2 #1/#2 root cause).
+const TEMPLATE_PAGE_PR: &str = r#"<hp:pagePr landscape="WIDELY" width="59528" height="84186" gutterType="LEFT_ONLY"><hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/></hp:pagePr>"#;
 const TEXT_SLOT: &str = "<hp:t/>";
 const LINESEG_SLOT_OPEN: &str = "<hp:linesegarray>";
 const LINESEG_SLOT_CLOSE: &str = "</hp:linesegarray>";
@@ -71,6 +75,12 @@ pub fn write_section(
     let mut out = EMPTY_SECTION_XML.replacen(TEXT_SLOT, &first_t, 1);
     out = replace_first_linesegs(&out, &first_linesegs);
 
+    // 정적 템플릿 pagePr 를 실제 PageDef 로 교체.
+    // 미교체 시 모든 HWPX 가 A4 세로 + 기본 여백으로 출력되어, 가로 용지(예: 246×173)
+    // 본문이 페이지에 안 담기고 표 세로줄이 잘리는 한컴 열람 깨짐이 발생한다.
+    let page_pr = render_page_pr(&section.section_def.page_def);
+    out = out.replacen(TEMPLATE_PAGE_PR, &page_pr, 1);
+
     // 첫 문단 `<hp:p>` 태그를 IR 기반 속성으로 교체
     if let Some(p) = first_para {
         let new_p_tag = render_hp_p_open(p, 0);
@@ -106,6 +116,30 @@ pub fn write_section(
     }
 
     Ok(out.into_bytes())
+}
+
+/// `PageDef` → `<hp:pagePr><hp:margin/></hp:pagePr>` 직렬화.
+///
+/// HWPX 규약: width/height 에 실제 용지 방향을 저장(파서가 landscape 플래그 무시).
+/// IR(HWP5 유래)은 landscape=true 시 short=width·long=height 로 저장하므로,
+/// 렌더러(`renderer/page_layout.rs::from_page_def`)와 동일하게 교환하여 출력한다.
+fn render_page_pr(page_def: &PageDef) -> String {
+    let (w, h) = if page_def.landscape {
+        (page_def.height, page_def.width)
+    } else {
+        (page_def.width, page_def.height)
+    };
+    let landscape = if w > h { "WIDELY" } else { "NARROWLY" };
+    format!(
+        r#"<hp:pagePr landscape="{landscape}" width="{w}" height="{h}" gutterType="LEFT_ONLY"><hp:margin header="{header}" footer="{footer}" gutter="{gutter}" left="{left}" right="{right}" top="{top}" bottom="{bottom}"/></hp:pagePr>"#,
+        header = page_def.margin_header,
+        footer = page_def.margin_footer,
+        gutter = page_def.margin_gutter,
+        left = page_def.margin_left,
+        right = page_def.margin_right,
+        top = page_def.margin_top,
+        bottom = page_def.margin_bottom,
+    )
 }
 
 /// IR의 Paragraph를 기반으로 `<hp:p>` 시작 태그를 생성.
@@ -655,6 +689,43 @@ mod tests {
             xml.contains(r#"styleIDRef="3""#),
             "<hp:p> must reflect style_id=3"
         );
+    }
+
+    #[test]
+    fn page_pr_reflects_section_page_def_not_static_template() {
+        // 회귀 가드: 정적 A4 템플릿이 아니라 실제 PageDef 가 직렬화돼야 한다.
+        // (피드백 v2 #1/#2 — exportHwpx 가 246×173 가로 용지를 A4 세로로 덮어쓰던 버그)
+        let mut para = Paragraph::default();
+        para.text = "x".to_string();
+        let mut section = Section::default();
+        section.paragraphs.push(para);
+        // 246×173mm 가로 용지를 HWP5 규약(short=width, long=height, landscape=true)으로 구성.
+        let pd = &mut section.section_def.page_def;
+        pd.width = 49228; // 173mm
+        pd.height = 69874; // 246mm
+        pd.landscape = true;
+        pd.margin_left = 6520; // 23mm
+        pd.margin_right = 6520;
+        pd.margin_top = 4819; // 17mm
+        pd.margin_bottom = 4819;
+        pd.margin_header = 1247; // 4.4mm
+        pd.margin_footer = 425;
+        let mut doc = Document::default();
+        doc.sections.push(section.clone());
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let bytes = write_section(&section, &doc, 0, &mut ctx).unwrap();
+        let xml = std::str::from_utf8(&bytes).unwrap();
+        // landscape 교환 후 width=69874(긴변), height=49228(짧은변), landscape="WIDELY".
+        assert!(
+            xml.contains(r#"<hp:pagePr landscape="WIDELY" width="69874" height="49228""#),
+            "pagePr must reflect swapped landscape dims, got: {:?}",
+            xml.find("<hp:pagePr").map(|i| &xml[i..(i + 90).min(xml.len())])
+        );
+        assert!(
+            xml.contains(r#"left="6520" right="6520" top="4819" bottom="4819""#),
+            "margin must reflect PageDef"
+        );
+        assert!(!xml.contains(r#"width="59528""#), "static A4 template must be replaced");
     }
 
     #[test]
