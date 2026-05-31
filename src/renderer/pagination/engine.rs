@@ -1816,6 +1816,23 @@ impl Paginator {
                 end_row = cursor_row + 1;
             }
 
+            // orphan keep-with-next (피드백 v2 #4-A): 통째로(분할 아님) 마지막에 놓일
+            // 행이 keep_with_next 면(예: 씬제목) 그 행이 속한 rowspan 블록을 다음
+            // 페이지로 밀어 다음 행과 함께 가게 한다 — 씬제목이 페이지 끝에 홀로
+            // 남는 것을 막는다.
+            //   - split_end_limit==0 : 마지막 행이 분할 아닌 통째 배치일 때만.
+            //   - end_row < row_count : 뒤에 따라올 행이 있어야 keep 의미.
+            //   - 블록 시작 > cursor_row : 밀어도 이 페이지에 최소 1행 남아 진행 가능.
+            if split_end_limit == 0.0 && end_row < row_count && end_row > cursor_row + 1 {
+                let last = end_row - 1;
+                if mt.row_keep_with_next.get(last).copied().unwrap_or(false) {
+                    let (b_start, _, _) = mt.row_block_for(last);
+                    if b_start > cursor_row {
+                        end_row = b_start;
+                    }
+                }
+            }
+
             // 이 범위의 높이 계산
             let partial_height: f64 = {
                 let delta = if content_offset > 0.0 && can_intra_split {

@@ -855,3 +855,67 @@ fn test_table_height_within_body_area() {
         }
     }
 }
+
+// #4-A orphan 방지: keep_with_next 행이 페이지 끝에 홀로 남지 않고 다음 페이지로 밀리는지.
+#[test]
+fn test_keep_with_next_pushes_orphan_row_to_next_page() {
+    use crate::model::table::{Table, Cell, TablePageBreak};
+    use crate::model::control::Control;
+    use crate::renderer::style_resolver::{ResolvedStyleSet, ResolvedParaStyle};
+
+    let paginator = Paginator::with_default_dpi();
+    let row_count: u16 = 8;
+    let cell_height: u32 = 13000;
+
+    let make = |keep_row: Option<u16>| -> Vec<Paragraph> {
+        let mut cells = Vec::new();
+        for r in 0..row_count {
+            let psid: u16 = if Some(r) == keep_row { 1 } else { 0 };
+            let lines = (cell_height / 1000).max(1);
+            let line_segs: Vec<LineSeg> = (0..lines)
+                .map(|_| LineSeg { line_height: 1000, ..Default::default() })
+                .collect();
+            let para = Paragraph { line_segs, para_shape_id: psid, ..Default::default() };
+            cells.push(Cell {
+                row: r, col: 0, row_span: 1, col_span: 1,
+                height: cell_height, width: 5000,
+                paragraphs: vec![para], ..Default::default()
+            });
+        }
+        let table = Table {
+            row_count, col_count: 1, cells,
+            page_break: TablePageBreak::CellBreak, ..Default::default()
+        };
+        let mut tp = Paragraph::default();
+        tp.controls.push(Control::Table(Box::new(table)));
+        vec![tp]
+    };
+
+    let styles = ResolvedStyleSet {
+        para_styles: vec![
+            ResolvedParaStyle::default(),
+            ResolvedParaStyle { keep_with_next: true, ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let pd = a4_page_def();
+    let cd = ColumnDef::default();
+
+    let first_page_end_row = |paras: &[Paragraph]| -> Option<usize> {
+        let (result, _m) = paginator.paginate(paras, &composed, &styles, &pd, &cd, 0);
+        result.pages.first().and_then(|pg| {
+            pg.column_contents.iter().flat_map(|c| &c.items).rev().find_map(|it| {
+                if let PageItem::PartialTable { end_row, .. } = it { Some(*end_row) } else { None }
+            })
+        })
+    };
+
+    // 1) keep 없이 자연 분할 → 첫 페이지 마지막에 놓이는 행 경계 e0.
+    let e0 = first_page_end_row(&make(None)).expect("8행 표는 2페이지로 분할되어야 함");
+    assert!(e0 >= 2 && (e0 as u16) < row_count, "자연 분할 end_row 비정상: {e0}");
+
+    // 2) 자연 break 의 마지막 행(e0-1)을 keep_with_next 로 → 다음 페이지로 밀려 end_row 가 1 감소.
+    let e1 = first_page_end_row(&make(Some(e0 as u16 - 1))).expect("부분 표 존재");
+    assert_eq!(e1, e0 - 1, "keep_with_next 행이 다음 페이지로 밀려야 함 (e0={e0}, e1={e1})");
+}

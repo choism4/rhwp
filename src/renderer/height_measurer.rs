@@ -114,6 +114,10 @@ pub struct MeasuredTable {
     /// 각 행이 속한 rowspan 묶음 블록의 종료 행 (exclusive, Task #398).
     /// 단일 행 블록이면 row_block_end[r] == r + 1.
     pub row_block_end: Vec<usize>,
+    /// 각 행이 keep_with_next(다음 행과 함께 유지) 문단을 포함하는지.
+    /// 씬제목 행이 페이지 끝에 홀로 남지 않도록 split_table_rows 가 참조한다.
+    /// 빈 vec 이면 keep 없음으로 간주(하위 호환).
+    pub row_keep_with_next: Vec<bool>,
 }
 
 /// 셀의 줄 단위 측정 정보 (행 내부 분할용)
@@ -451,6 +455,7 @@ impl HeightMeasurer {
                 page_break: crate::model::table::TablePageBreak::None,
                 row_block_start: rbs,
                 row_block_end: rbe,
+                row_keep_with_next: vec![false; rc],
             };
         }
         // 1x1 래퍼 표 감지: 내부 표의 높이를 직접 측정.
@@ -970,6 +975,32 @@ impl HeightMeasurer {
         }
 
         let (row_block_start, row_block_end) = compute_row_blocks(table, row_heights.len());
+        // 행별 keep_with_next — 셀 문단 중 keep_with_next 스타일이 있으면 그 행(rowspan
+        // 블록 전체)을 표시. orphan 씬제목 방지에 split_table_rows 가 사용.
+        let row_keep_with_next: Vec<bool> = {
+            let rc = row_heights.len();
+            let mut v = vec![false; rc];
+            for cell in &table.cells {
+                let r = cell.row as usize;
+                if r >= rc {
+                    continue;
+                }
+                let keep = cell.paragraphs.iter().any(|p| {
+                    styles
+                        .para_styles
+                        .get(p.para_shape_id as usize)
+                        .map(|s| s.keep_with_next)
+                        .unwrap_or(false)
+                });
+                if keep {
+                    let r_end = (r + cell.row_span as usize).min(rc);
+                    for slot in v.iter_mut().take(r_end).skip(r) {
+                        *slot = true;
+                    }
+                }
+            }
+            v
+        };
         MeasuredTable {
             para_index,
             control_index,
@@ -986,6 +1017,7 @@ impl HeightMeasurer {
             page_break: table.page_break,
             row_block_start,
             row_block_end,
+            row_keep_with_next,
         }
     }
 
@@ -1659,7 +1691,7 @@ mod tests {
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0], // 0, 20, 20+30+5, 55+25+5
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         let end = mt.find_break_row(200.0, 0, 20.0); // 200px 충분
         assert_eq!(end, 3); // 전부 fit
@@ -1675,7 +1707,7 @@ mod tests {
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0, 130.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         // avail=60, cursor=0, first_row_h=20
         // range(0,1)=20, range(0,2)=55, range(0,3)=85 > 60
@@ -1698,7 +1730,7 @@ mod tests {
             cumulative_heights: vec![0.0, 50.0, 85.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         let end = mt.find_break_row(30.0, 0, 50.0); // 30 < 50
         assert_eq!(end, 0); // 첫 행도 안 들어감
@@ -1713,7 +1745,7 @@ mod tests {
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         // range(0,0) = 0
         assert_eq!(mt.range_height(0, 0), 0.0);
@@ -1739,7 +1771,7 @@ mod tests {
             cumulative_heights: vec![0.0, 50.0, 85.0, 115.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         // avail=60, effective_first=50 → end=1 (range(0,1)=50, range(0,2)=85>60)
         let end1 = mt.find_break_row(60.0, 0, 50.0);
@@ -1760,7 +1792,7 @@ mod tests {
             cumulative_heights: vec![0.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         assert_eq!(mt.find_break_row(100.0, 0, 0.0), 0);
         assert_eq!(mt.range_height(0, 0), 0.0);
@@ -1775,7 +1807,7 @@ mod tests {
             cumulative_heights: vec![0.0, 50.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         assert_eq!(mt.find_break_row(100.0, 0, 50.0), 1); // fit
         assert_eq!(mt.find_break_row(30.0, 0, 50.0), 0); // doesn't fit
@@ -1865,7 +1897,7 @@ mod tests {
             cumulative_heights: vec![0.0, 20.0, 55.0, 85.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![0, 0, 2], row_block_end: vec![2, 2, 3],
+            row_block_start: vec![0, 0, 2], row_block_end: vec![2, 2, 3], row_keep_with_next: vec![],
         };
         // 행 0: 블록 (0, 2, h=20+30+5=55)
         let (s, e, h) = mt.row_block_for(0);
@@ -1891,7 +1923,7 @@ mod tests {
             cumulative_heights: vec![0.0, 20.0, 55.0],
             repeat_header: false, has_header_cells: false,
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         let (s, e, h) = mt.row_block_for(0);
         assert_eq!((s, e), (0, 1));
@@ -1913,6 +1945,7 @@ mod tests {
             cells: vec![], page_break: crate::model::table::TablePageBreak::None,
             row_block_start: vec![0, 0, 2, 3, 3],
             row_block_end:   vec![2, 2, 3, 5, 5],
+            row_keep_with_next: vec![],
         };
         // end_row=0: 블록 시작 → 0
         assert_eq!(mt.snap_to_block_boundary(0), 0);
@@ -1941,6 +1974,7 @@ mod tests {
             page_break: crate::model::table::TablePageBreak::RowBreak,
             row_block_start: vec![0, 0, 2, 3, 3],
             row_block_end:   vec![2, 2, 3, 5, 5],
+            row_keep_with_next: vec![],
         };
         // None 정책에서는 end_row=1 → 0 으로 후퇴, RowBreak 에서는 1 그대로
         assert_eq!(mt.snap_to_block_boundary(1), 1);
@@ -1957,7 +1991,7 @@ mod tests {
             cumulative_heights: vec![0.0], repeat_header: false,
             has_header_cells: false, cells: vec![],
             page_break: crate::model::table::TablePageBreak::None,
-            row_block_start: vec![], row_block_end: vec![],
+            row_block_start: vec![], row_block_end: vec![], row_keep_with_next: vec![],
         };
         assert!(!mt.allows_row_break_split());
         mt.page_break = crate::model::table::TablePageBreak::CellBreak;
