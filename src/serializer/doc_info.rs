@@ -20,8 +20,14 @@ use crate::parser::tags;
 
 /// DocInfo + DocProperties를 레코드 바이너리 스트림으로 직렬화
 pub fn serialize_doc_info(doc_info: &DocInfo, doc_props: &DocProperties) -> Vec<u8> {
+    // 70바이트 문서(5.0.2.x)에 74바이트 char_shape 가 섞이면 버전 불일치로 한컴이 글꼴을
+    // 빈칸 처리한다. 이 경우 raw_stream 조기반환을 막고 전체 재직렬화 경로로 보내 char_shape
+    // 를 70바이트로 truncate 한다(무변경 라운드트립이 content-identical 임을 검증 — 안전).
+    let has_70 = doc_info.char_shapes.iter().filter_map(|c| c.raw_data.as_ref()).any(|d| d.len() <= 70);
+    let has_74 = doc_info.char_shapes.iter().filter_map(|c| c.raw_data.as_ref()).any(|d| d.len() > 70);
+    let needs_char_shape_fix = has_70 && has_74;
     // 원본 스트림이 있고 변경되지 않았으면 그대로 반환 (완벽한 라운드트립)
-    if !doc_info.raw_stream_dirty {
+    if !doc_info.raw_stream_dirty && !needs_char_shape_fix {
         if let Some(ref raw) = doc_info.raw_stream {
             let mut result = raw.clone();
             // 배포용 문서 해제 시 DISTRIBUTE_DOC_DATA 레코드 제거
@@ -66,8 +72,24 @@ pub fn serialize_doc_info(doc_info: &DocInfo, doc_props: &DocProperties) -> Vec<
         stream.extend(write_record(tags::HWPTAG_BORDER_FILL, 1, &data));
     }
 
+    // 생성 char_shape 의 strike_color 포함 여부를 문서의 기존(raw 보존) char_shape
+    // 바이트 길이에 맞춘다 — 70바이트 문서(5.0.2.x)면 strike_color 생략(한컴 정합).
+    let include_strike_color = !doc_info
+        .char_shapes
+        .iter()
+        .filter_map(|c| c.raw_data.as_ref())
+        .any(|d| d.len() <= 70);
     for cs in &doc_info.char_shapes {
-        let data = cs.raw_data.clone().unwrap_or_else(|| serialize_char_shape(cs));
+        let mut data = cs
+            .raw_data
+            .clone()
+            .unwrap_or_else(|| serialize_char_shape_versioned(cs, include_strike_color));
+        // 70바이트 문서(5.0.2.x)인데 raw 보존/생성 char_shape 가 74바이트면 마지막 4바이트
+        // (strike_color, 5.0.3.0+ 필드)를 잘라 버전 정합을 맞춘다. 74바이트 char_shape 를
+        // 5.0.2.x 문서에 쓰면 한컴이 폰트 참조를 못 읽어 본문 글꼴이 빈칸이 된다(작가 PC 실측).
+        if !include_strike_color && data.len() > 70 {
+            data.truncate(70);
+        }
         stream.extend(write_record(tags::HWPTAG_CHAR_SHAPE, 1, &data));
     }
 
@@ -338,6 +360,13 @@ fn serialize_fill(w: &mut ByteWriter, fill: &crate::model::style::Fill) {
 }
 
 pub fn serialize_char_shape(cs: &CharShape) -> Vec<u8> {
+    serialize_char_shape_versioned(cs, true)
+}
+
+/// `include_strike_color`: HWP 5.0.3.0+ 에서만 취소선 색(마지막 4바이트)을 쓴다.
+/// 5.0.2.x 문서(70바이트 char_shape)에 74바이트를 쓰면 버전 불일치로 한컴이
+/// 레코드를 오독해 글꼴을 빈칸으로 표시한다 — 문서 char_shape 크기에 맞춘다.
+pub fn serialize_char_shape_versioned(cs: &CharShape, include_strike_color: bool) -> Vec<u8> {
     let mut w = ByteWriter::new();
 
     // font_ids (7 × u16)
@@ -416,8 +445,10 @@ pub fn serialize_char_shape(cs: &CharShape) -> Vec<u8> {
     w.write_color_ref(cs.shadow_color).unwrap();
     // 글자 테두리/배경 ID (5.0.2.1 이상)
     w.write_u16(cs.border_fill_id).unwrap();
-    // 취소선 색 (5.0.3.0 이상)
-    w.write_color_ref(cs.strike_color).unwrap();
+    // 취소선 색 (5.0.3.0 이상) — 구버전 문서에는 쓰지 않는다(70바이트 유지).
+    if include_strike_color {
+        w.write_color_ref(cs.strike_color).unwrap();
+    }
 
     w.into_bytes()
 }

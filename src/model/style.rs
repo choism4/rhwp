@@ -569,6 +569,9 @@ pub struct CharShapeMods {
     pub engrave: Option<bool>,
     /// 언어별 개별 글꼴 ID (7개: 한글/영문/한자/일어/기타/기호/사용자)
     pub font_ids: Option<[u16; 7]>,
+    /// 한글 슬롯(index 0)만 변경. 나머지 6개 언어슬롯은 base 보존.
+    /// font_ids 로 7개 전부 도배하면 한컴이 "대표 글꼴"을 빈칸으로 표시(언어슬롯 비정합).
+    pub hangul_font_id: Option<u16>,
     /// 글자 테두리/배경 ID (1-based, 0=없음)
     pub border_fill_id: Option<u16>,
     /// 강조점 종류 (0~6)
@@ -585,8 +588,6 @@ impl CharShapeMods {
     /// 기존 CharShape에 수정사항을 적용한 새 CharShape를 반환한다.
     pub fn apply_to(&self, base: &CharShape) -> CharShape {
         let mut cs = base.clone();
-        // 수정된 CharShape는 원본 바이트와 달라지므로 raw_data 무효화
-        cs.raw_data = None;
         if let Some(v) = self.bold { cs.bold = v; }
         if let Some(v) = self.italic { cs.italic = v; }
         if let Some(v) = self.underline {
@@ -634,11 +635,65 @@ impl CharShapeMods {
             if v { cs.emboss = false; }
         }
         if let Some(ids) = self.font_ids { cs.font_ids = ids; }
+        // 한글 슬롯만 변경 (font_ids 전체 도배 회피 — 한컴 대표글꼴 정합).
+        if let Some(id) = self.hangul_font_id { cs.font_ids[0] = id; }
         if let Some(v) = self.border_fill_id { cs.border_fill_id = v; }
         if let Some(v) = self.emphasis_dot { cs.emphasis_dot = v; }
         if let Some(v) = self.underline_shape { cs.underline_shape = v; }
         if let Some(v) = self.strike_shape { cs.strike_shape = v; }
         if let Some(v) = self.kerning { cs.kerning = v; }
+
+        // raw_data 처리: 한컴은 rhwp 가 재직렬화한 char_shape 레코드를 거부해 글꼴을 빈칸으로
+        // 표시한다(작가 PC 한컴독스 실측, v3). 원본 raw 바이트 구조를 보존하고 변경 필드만
+        // in-place 패치하면 한컴-유효 레코드가 유지된다(master page raw-patch 와 동일 교훈).
+        // 패치 가능 필드: 글꼴 ID(byte 0-13), 글자크기(byte 42-43). 그 외 속성이 바뀌면
+        // 안전하게 재직렬화(raw=None)로 폴백한다.
+        let only_patchable = self.bold.is_none()
+            && self.italic.is_none()
+            && self.underline.is_none()
+            && self.strikethrough.is_none()
+            && self.text_color.is_none()
+            && self.shade_color.is_none()
+            && self.underline_type.is_none()
+            && self.underline_color.is_none()
+            && self.outline_type.is_none()
+            && self.shadow_type.is_none()
+            && self.shadow_offset_x.is_none()
+            && self.shadow_offset_y.is_none()
+            && self.strike_color.is_none()
+            && self.superscript.is_none()
+            && self.subscript.is_none()
+            && self.ratios.is_none()
+            && self.spacings.is_none()
+            && self.relative_sizes.is_none()
+            && self.char_offsets.is_none()
+            && self.emboss.is_none()
+            && self.engrave.is_none()
+            && self.border_fill_id.is_none()
+            && self.emphasis_dot.is_none()
+            && self.underline_shape.is_none()
+            && self.strike_shape.is_none()
+            && self.kerning.is_none();
+        if only_patchable {
+            if let Some(raw) = cs.raw_data.as_mut() {
+                if raw.len() >= 44 {
+                    // 글꼴 ID 7개 (byte 0-13, u16 LE) — model font_ids 와 동기화
+                    for (i, fid) in cs.font_ids.iter().enumerate() {
+                        let b = fid.to_le_bytes();
+                        raw[i * 2] = b[0];
+                        raw[i * 2 + 1] = b[1];
+                    }
+                    // 글자크기 (byte 42-43, u16 LE)
+                    let sz = (cs.base_size as u16).to_le_bytes();
+                    raw[42] = sz[0];
+                    raw[43] = sz[1];
+                } else {
+                    cs.raw_data = None;
+                }
+            }
+        } else {
+            cs.raw_data = None;
+        }
         cs
     }
 }

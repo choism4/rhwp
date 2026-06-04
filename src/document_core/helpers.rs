@@ -273,6 +273,7 @@ pub(crate) fn parse_char_shape_mods(json: &str) -> crate::model::style::CharShap
     if let Some(v) = json_bool(json, "kerning") { mods.kerning = Some(v); }
     // 언어별 배열
     if let Some(arr) = json_u16_array(json, "fontIds") { mods.font_ids = Some(arr); }
+    if let Some(v) = json_i32(json, "hangulFontId") { mods.hangul_font_id = Some(v as u16); }
     if let Some(arr) = json_u8_array(json, "ratios") { mods.ratios = Some(arr); }
     if let Some(arr) = json_i8_array(json, "spacings") { mods.spacings = Some(arr); }
     if let Some(arr) = json_u8_array(json, "relativeSizes") { mods.relative_sizes = Some(arr); }
