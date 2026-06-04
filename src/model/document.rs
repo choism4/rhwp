@@ -264,12 +264,27 @@ impl Document {
     /// 본문 글꼴 적용은 새로 만들지 않고 같은 글꼴의 원본 char_shape 를 재사용한다.
     /// `prefer_size` 가 주어지면 글꼴+크기 모두 일치하는 것을 우선, 없으면 글꼴만 일치.
     pub fn find_char_shape_by_hangul_font(&self, font_id: u16, prefer_size: Option<i32>) -> Option<u32> {
+        // 본문은 비볼드가 정상(기준본 대조: MBC body font5 비볼드 2010 / 볼드 0).
+        // 같은 글꼴/크기에 볼드·비볼드 char_shape가 공존하면 비볼드를 우선해
+        // 본문이 의도치 않게 굵어지는 것을 막는다.
+        let cs = &self.doc_info.char_shapes;
+        let non_bold = |c: &super::style::CharShape| !c.bold;
         if let Some(sz) = prefer_size {
-            if let Some(i) = self.doc_info.char_shapes.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz) {
+            // 1순위: 글꼴+크기+비볼드
+            if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz && non_bold(c)) {
+                return Some(i as u32);
+            }
+            // 2순위: 글꼴+크기 (볼드 무관)
+            if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz) {
                 return Some(i as u32);
             }
         }
-        self.doc_info.char_shapes.iter().position(|c| c.font_ids[0] == font_id).map(|i| i as u32)
+        // 3순위: 글꼴+비볼드
+        if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && non_bold(c)) {
+            return Some(i as u32);
+        }
+        // 4순위: 글꼴만
+        cs.iter().position(|c| c.font_ids[0] == font_id).map(|i| i as u32)
     }
 
     pub fn find_or_create_char_shape(
