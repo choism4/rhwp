@@ -264,27 +264,35 @@ impl Document {
     /// 본문 글꼴 적용은 새로 만들지 않고 같은 글꼴의 원본 char_shape 를 재사용한다.
     /// `prefer_size` 가 주어지면 글꼴+크기 모두 일치하는 것을 우선, 없으면 글꼴만 일치.
     pub fn find_char_shape_by_hangul_font(&self, font_id: u16, prefer_size: Option<i32>) -> Option<u32> {
-        // 본문은 비볼드가 정상(기준본 대조: MBC body font5 비볼드 2010 / 볼드 0).
-        // 같은 글꼴/크기에 볼드·비볼드 char_shape가 공존하면 비볼드를 우선해
-        // 본문이 의도치 않게 굵어지는 것을 막는다.
+        // 같은 한글 글꼴(font_id)을 쓰는 원본 char_shape 중에서 고른다.
+        // 크기 거리(|base_size-prefer_size|)가 가장 가까운 것을 우선하고,
+        // 거리가 같으면 비볼드를 우선한다. 이렇게 하면 본문(14pt 비볼드)과
+        // 씬제목(윤고딕140 15pt — 기준본엔 16pt 볼드가 최근접)이 각각 옳게 선택된다.
         let cs = &self.doc_info.char_shapes;
-        let non_bold = |c: &super::style::CharShape| !c.bold;
+        let candidates: Vec<usize> = cs
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.font_ids[0] == font_id)
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
         if let Some(sz) = prefer_size {
-            // 1순위: 글꼴+크기+비볼드
-            if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz && non_bold(c)) {
-                return Some(i as u32);
-            }
-            // 2순위: 글꼴+크기 (볼드 무관)
-            if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz) {
-                return Some(i as u32);
-            }
+            return candidates
+                .iter()
+                .min_by_key(|&&i| {
+                    let c = &cs[i];
+                    ((c.base_size - sz).abs(), c.bold as i32)
+                })
+                .map(|&i| i as u32);
         }
-        // 3순위: 글꼴+비볼드
-        if let Some(i) = cs.iter().position(|c| c.font_ids[0] == font_id && non_bold(c)) {
-            return Some(i as u32);
-        }
-        // 4순위: 글꼴만
-        cs.iter().position(|c| c.font_ids[0] == font_id).map(|i| i as u32)
+        // 크기 미지정: 비볼드 우선, 없으면 첫 후보.
+        candidates
+            .iter()
+            .find(|&&i| !cs[i].bold)
+            .or_else(|| candidates.first())
+            .map(|&i| i as u32)
     }
 
     pub fn find_or_create_char_shape(
