@@ -4880,6 +4880,28 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 셀 범위에 한글 글꼴 적용 — 기존(원본) char_shape 재사용(한컴 빈폰트 회피).
+    #[wasm_bindgen(js_name = applyExistingHangulFontInCell)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_existing_hangul_font_in_cell(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        font_id: u32,
+        prefer_size: i32,
+    ) -> Result<String, JsValue> {
+        self.apply_existing_hangul_font_in_cell_native(
+            sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx,
+            start_offset, end_offset, font_id as u16, prefer_size,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 감추기 설정
     #[wasm_bindgen(js_name = setPageHide)]
     pub fn set_page_hide(

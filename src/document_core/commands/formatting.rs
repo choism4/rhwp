@@ -792,6 +792,42 @@ impl DocumentCore {
         Ok("{\"ok\":true}".to_string())
     }
 
+    /// 셀 텍스트 범위에 한글 글꼴을 적용하되 **기존(원본) char_shape 를 재사용**한다.
+    /// 새 char_shape 를 append 하면 한컴이 글꼴을 빈칸으로 표시(작가 PC 실측) — 같은 글꼴의
+    /// 원본 char_shape 가 있으면 그 id 를 재사용해 한컴-정합을 보장한다. 없으면 생성 폴백.
+    pub fn apply_existing_hangul_font_in_cell_native(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        start_offset: usize,
+        end_offset: usize,
+        font_id: u16,
+        prefer_size: i32,
+    ) -> Result<String, HwpError> {
+        let size = if prefer_size > 0 { Some(prefer_size) } else { None };
+        let new_id = if let Some(id) = self.document.find_char_shape_by_hangul_font(font_id, size) {
+            id
+        } else {
+            // 원본에 같은 글꼴 char_shape 가 없으면 생성 폴백(한컴 빈폰트 가능, 드묾).
+            let base_id = self
+                .get_cell_paragraph_ref(sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx)
+                .and_then(|p| p.char_shape_id_at(start_offset))
+                .unwrap_or(0);
+            let mut mods = crate::model::style::CharShapeMods::default();
+            mods.hangul_font_id = Some(font_id);
+            if let Some(sz) = size { mods.base_size = Some(sz); }
+            self.document.find_or_create_char_shape(base_id, &mods)
+        };
+        let cell_para = self.get_cell_paragraph_mut(sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx)?;
+        cell_para.apply_char_shape_range(start_offset, end_offset, new_id);
+        self.document.sections[sec_idx].raw_stream = None;
+        self.rebuild_section(sec_idx);
+        Ok(super::super::helpers::json_ok_with(&format!("\"charShapeId\":{}", new_id)))
+    }
+
     /// 문단 서식 적용 (네이티브) — 본문 문단
     pub fn apply_para_format_native(
         &mut self,

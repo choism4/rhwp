@@ -258,6 +258,20 @@ impl Document {
     /// 기존 CharShape를 복제하고 수정사항을 적용한 후, 동일한 것이 있으면 재사용한다.
     ///
     /// 반환값: 적용된 CharShape의 ID (기존 또는 새로 생성)
+    /// 한글 슬롯(index 0) 글꼴이 `font_id` 인 기존 char_shape 를 찾는다(가장 낮은 id 우선).
+    /// 한컴은 우리가 새로 append 한 char_shape 의 글꼴을 빈칸으로 표시하지만, 템플릿 원본
+    /// char_shape 는 정상 표시한다(작가 PC 실측, 인물명=원본 재사용이 성공 케이스). 따라서
+    /// 본문 글꼴 적용은 새로 만들지 않고 같은 글꼴의 원본 char_shape 를 재사용한다.
+    /// `prefer_size` 가 주어지면 글꼴+크기 모두 일치하는 것을 우선, 없으면 글꼴만 일치.
+    pub fn find_char_shape_by_hangul_font(&self, font_id: u16, prefer_size: Option<i32>) -> Option<u32> {
+        if let Some(sz) = prefer_size {
+            if let Some(i) = self.doc_info.char_shapes.iter().position(|c| c.font_ids[0] == font_id && c.base_size == sz) {
+                return Some(i as u32);
+            }
+        }
+        self.doc_info.char_shapes.iter().position(|c| c.font_ids[0] == font_id).map(|i| i as u32)
+    }
+
     pub fn find_or_create_char_shape(
         &mut self,
         base_id: u32,
