@@ -84,6 +84,18 @@ fn main() {
         }
     }
 
+    // Picture control 을 지워도 이미지 BinData 블롭(실제 바이트)은 남아 파일이
+    // 비대해진다(KBS 기준본 제작진 사진 2.3MB). 전 BinData 이미지를 비워 dead
+    // weight 제거 — 출력에는 어차피 안 쓰이는(control 삭제됨) 이미지들.
+    let bin_count = core.document().doc_info.bin_data_list.len();
+    let mut blanked = 0;
+    for i in 0..bin_count {
+        if core.blank_bin_data_image(i as u16).is_ok() {
+            blanked += 1;
+        }
+    }
+    println!("  BinData 이미지 {}/{} 개 비움", blanked, bin_count);
+
     let out = core.export_hwp_with_adapter().expect("직렬화");
     fs::write(&a[1], &out).expect("출력 쓰기");
     println!(
