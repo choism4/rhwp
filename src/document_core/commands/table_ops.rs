@@ -482,6 +482,81 @@ impl DocumentCore {
         Ok(format!("{{\"ok\":true,\"applied\":{}}}", applied))
     }
 
+    /// 셀 배경색만 변경한다 (테두리/대각선 보존). v4 ②③ — 씬구성표 숫자·회차셀 회색.
+    ///
+    /// 셀의 현재 border_fill 을 복제해 fill 만 Solid(rgb) 로 바꾼 새 border_fill 을
+    /// 만들어 할당한다(기존 보더선 유지). 동일 border_fill 이 있으면 재사용.
+    /// 직렬화는 raw_data=None → serialize_border_fill(HWP) / write_border_fills(HWPX)
+    /// 모델 경로로 처리되고, raw_stream_dirty=true 로 DocInfo 전체 재직렬화된다.
+    pub(crate) fn set_cell_fill_color_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        rgb: u32,
+    ) -> Result<String, HwpError> {
+        use crate::model::style::{Fill, FillType, SolidFill};
+
+        // 1. 현재 셀 border_fill_id (1-base, 0=없음)
+        let cur_bf_id = {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            let cell = table.cells.get(cell_idx)
+                .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+            cell.border_fill_id
+        };
+
+        // 2. 기존 border_fill 복제(보더/대각선 보존) → fill 만 회색 Solid
+        let mut bf = if cur_bf_id >= 1 {
+            self.document.doc_info.border_fills.get((cur_bf_id - 1) as usize).cloned().unwrap_or_default()
+        } else {
+            crate::model::style::BorderFill::default()
+        };
+        bf.raw_data = None; // 모델 직렬화 강제 (fill 변경 반영)
+        bf.fill = Fill {
+            fill_type: FillType::Solid,
+            solid: Some(SolidFill { background_color: rgb, pattern_color: 0, pattern_type: 0 }),
+            alpha: 255,
+            ..Default::default()
+        };
+
+        // 3. 동일 border_fill dedup, 없으면 push (id = 1-base)
+        let new_id = {
+            let mut found = None;
+            for (i, existing) in self.document.doc_info.border_fills.iter().enumerate() {
+                if crate::document_core::helpers::border_fills_equal(existing, &bf) {
+                    found = Some((i + 1) as u16);
+                    break;
+                }
+            }
+            match found {
+                Some(id) => id,
+                None => {
+                    self.document.doc_info.border_fills.push(bf);
+                    self.document.doc_info.border_fills.len() as u16
+                }
+            }
+        };
+
+        // 4. 셀에 할당
+        {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            let cell = table.cells.get_mut(cell_idx)
+                .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+            cell.border_fill_id = new_id;
+        }
+
+        self.document.doc_info.raw_stream_dirty = true;
+        // 표 셀은 section.raw_stream 캐시에서 직렬화되므로, border_fill_id 변경이
+        // 반영되려면 해당 section 의 raw_stream 을 무효화해 모델 경로로 재직렬화한다.
+        // (insert_table_row_native 등과 동일 패턴)
+        if section_idx < self.document.sections.len() {
+            self.document.sections[section_idx].raw_stream = None;
+        }
+        self.styles = crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
+        Ok(format!("{{\"ok\":true,\"borderFillId\":{}}}", new_id))
+    }
+
     /// 셀 속성을 수정한다 (네이티브).
     pub(crate) fn set_cell_properties_native(
         &mut self,

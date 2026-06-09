@@ -1946,6 +1946,29 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 셀 배경색만 변경한다 (테두리 보존). v4 ②③ — 씬구성표 숫자·회차셀 회색.
+    ///
+    /// rgb: 0xRRGGBB (예: 연한 회색 RGB(214,214,214) = 0xD6D6D6).
+    /// 반환: JSON `{"ok":true,"borderFillId":N}`
+    #[wasm_bindgen(js_name = setCellFillColor)]
+    pub fn set_cell_fill_color(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        rgb: u32,
+    ) -> Result<String, JsValue> {
+        self.set_cell_fill_color_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            rgb,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`
