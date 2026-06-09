@@ -559,10 +559,15 @@ impl DocumentCore {
     pub fn find_or_create_font_id_native(&mut self, name: &str) -> i32 {
         let font_faces = &self.document.doc_info.font_faces;
 
-        // 한글(0번) 카테고리에서 검색
+        // 한글(0번) 카테고리에서 검색.
+        // 윤폰트는 한컴이 '-' 접두("-윤명조130")로 임베드하는데 주입명은 no-dash(윤명조130)
+        // 라 exact-match 가 실패해 phantom no-dash face 를 새로 만든다(v4 #10 / v3 #1).
+        // leading '-_공백' 을 strip 한 normalized 비교로 기존 dash face 를 재사용한다
+        // (TS font-mapping.ts 의 NORMALIZE_PREFIX_RE 와 동일 규칙).
         if !font_faces.is_empty() {
+            let target = normalize_font_name(name);
             for (idx, font) in font_faces[0].iter().enumerate() {
-                if font.name == name {
+                if normalize_font_name(&font.name) == target {
                     return idx as i32;
                 }
             }
@@ -602,9 +607,10 @@ impl DocumentCore {
         let font_faces = &self.document.doc_info.font_faces;
         if font_faces.len() <= lang { return -1; }
 
-        // 해당 언어 카테고리에서 검색
+        // 해당 언어 카테고리에서 검색 (dash 정규화 — find_or_create_font_id_native 와 동일).
+        let target = normalize_font_name(name);
         for (idx, font) in font_faces[lang].iter().enumerate() {
-            if font.name == name {
+            if normalize_font_name(&font.name) == target {
                 return idx as i32;
             }
         }
@@ -1317,4 +1323,11 @@ impl DocumentCore {
         }
         Ok("{\"ok\":true,\"exists\":false}".to_string())
     }
+}
+
+/// 폰트명 비교용 정규화 — leading '-', '_', 공백을 제거한다.
+/// 윤폰트는 한컴이 '-윤명조130' 처럼 dash 접두로 임베드하지만 주입명은 '윤명조130'
+/// 인 경우가 많아, 접두 차이만으로 다른 폰트로 오인되는 것을 막는다.
+fn normalize_font_name(name: &str) -> &str {
+    name.trim_start_matches(['-', '_', ' ', '\t'])
 }
