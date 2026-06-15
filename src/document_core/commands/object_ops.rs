@@ -2270,6 +2270,147 @@ impl DocumentCore {
         Ok(super::super::helpers::json_ok_with(&format!("\"paraIdx\":{},\"controlIdx\":{}", insert_para_idx, insert_ctrl_idx)))
     }
 
+    /// 기존 도형(예: MEMO 묶음 박스)을 편집 가능한 글상자(Rectangle + text_box)로
+    /// in-place 변환한다. 지오메트리(위치·크기·배치)와 테두리 박스는 보존하되,
+    /// 빈 편집 가능 문단을 가진 text_box 를 추가해 한컴에서 텍스트 입력·서식 변경이
+    /// 가능하도록 한다. script-ai v4 ⑦ — 첫장 MEMO 편집 가능화.
+    pub fn convert_shape_to_textbox_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        control_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::shape::*;
+        use crate::model::paragraph::{CharShapeRef, LineSeg};
+        use crate::model::style::{Fill, ShapeBorderLine};
+
+        let section = self.document.sections.get(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx)))?;
+        let para = section.paragraphs.get(para_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("문단 인덱스 {} 범위 초과", para_idx)))?;
+        let default_char_shape_id: u32 = para.char_shapes.first().map(|c| c.char_shape_id).unwrap_or(0);
+        let default_para_shape_id: u16 = para.para_shape_id;
+        let ctrl = para.controls.get(control_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("컨트롤 인덱스 {} 범위 초과", control_idx)))?;
+        let mut common = match ctrl {
+            Control::Shape(s) => s.common().clone(),
+            _ => return Err(HwpError::RenderError("Shape 컨트롤이 아닙니다".to_string())),
+        };
+
+        let width = common.width.max(1);
+        let height = common.height.max(1);
+        let w_i = width as i32;
+        let h_i = height as i32;
+
+        // 글상자용 공통 속성: 지오메트리 보존, ctrl_id='$rec', text 흐름 textbox attr.
+        common.ctrl_id = 0x24726563; // '$rec'
+        // attr: Para/Top/Column/Left/Square = 글상자 표준 (create_shape_control_native 참조).
+        common.attr = if common.treat_as_char { 0x0A0210 | 0x01 } else { 0x0A0210 };
+
+        // 빈 편집 가능 문단 (글상자 내부)
+        let tb_inner_width = width.saturating_sub(1020);
+        let mut inner_raw_header_extra = vec![0u8; 10];
+        inner_raw_header_extra[0..2].copy_from_slice(&1u16.to_le_bytes());
+        inner_raw_header_extra[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let inner_para = crate::model::paragraph::Paragraph {
+            text: String::new(),
+            char_count: 1,
+            char_count_msb: true,
+            control_mask: 0,
+            para_shape_id: default_para_shape_id,
+            style_id: 0,
+            char_shapes: vec![CharShapeRef { start_pos: 0, char_shape_id: default_char_shape_id }],
+            line_segs: vec![LineSeg {
+                text_start: 0,
+                line_height: 1000,
+                text_height: 1000,
+                baseline_distance: 850,
+                line_spacing: 600,
+                segment_width: tb_inner_width as i32,
+                tag: 0x00060000,
+                ..Default::default()
+            }],
+            has_para_text: false,
+            raw_header_extra: inner_raw_header_extra,
+            ..Default::default()
+        };
+
+        let drawing = DrawingObjAttr {
+            shape_attr: ShapeComponentAttr {
+                ctrl_id: 0x24726563,
+                is_two_ctrl_id: true,
+                original_width: width,
+                original_height: height,
+                current_width: width,
+                current_height: height,
+                local_file_version: 1,
+                flip: 0x00080000,
+                rotation_center: crate::model::Point { x: (width / 2) as i32, y: (height / 2) as i32 },
+                ..Default::default()
+            },
+            // 테두리 보존: 얇은 실선 박스 (MEMO 외곽선 유지).
+            border_line: ShapeBorderLine { color: 0, width: 13, attr: 0xD1000041, outline_style: 0 },
+            fill: Fill::default(),
+            text_box: Some(TextBox {
+                list_attr: 0x20,
+                vertical_align: crate::model::table::VerticalAlign::Top,
+                margin_left: 283,
+                margin_right: 283,
+                margin_top: 283,
+                margin_bottom: 283,
+                max_width: width,
+                raw_list_header_extra: vec![0u8; 13],
+                paragraphs: vec![inner_para],
+            }),
+            caption: None,
+            ..Default::default()
+        };
+
+        let rect = ShapeObject::Rectangle(RectangleShape {
+            common,
+            drawing,
+            round_rate: 0,
+            x_coords: [0, w_i, w_i, 0],
+            y_coords: [0, 0, h_i, h_i],
+        });
+
+        let para_mut = &mut self.document.sections[section_idx].paragraphs[para_idx];
+        para_mut.controls[control_idx] = Control::Shape(Box::new(rect));
+        if control_idx < para_mut.ctrl_data_records.len() {
+            para_mut.ctrl_data_records[control_idx] = None;
+        }
+        self.document.sections[section_idx].raw_stream = None;
+        self.document.doc_info.raw_stream_dirty = true;
+        Ok("{\"ok\":true}".to_string())
+    }
+
+    /// 첫장 MEMO 묶음 박스를 일괄로 편집 가능한 글상자로 변환한다.
+    /// 텍스트에 "MEMO" 를 포함하고 Group 도형을 가진 문단의 그 Group 을 대상으로 한다.
+    /// 반환: JSON `{"ok":true,"converted":N}`
+    pub fn convert_memo_boxes_native(&mut self) -> Result<String, HwpError> {
+        // (section, para, control) 목록 수집 — 변환은 인덱스 보존(in-place)이므로 안전.
+        let mut targets: Vec<(usize, usize, usize)> = Vec::new();
+        for (si, sec) in self.document.sections.iter().enumerate() {
+            for (pi, para) in sec.paragraphs.iter().enumerate() {
+                if !para.text.contains("MEMO") { continue; }
+                for (ci, ctrl) in para.controls.iter().enumerate() {
+                    if let Control::Shape(s) = ctrl {
+                        if matches!(**s, crate::model::shape::ShapeObject::Group(_)) {
+                            targets.push((si, pi, ci));
+                        }
+                    }
+                }
+            }
+        }
+        let mut converted = 0usize;
+        for (si, pi, ci) in targets {
+            if self.convert_shape_to_textbox_native(si, pi, ci).is_ok() {
+                converted += 1;
+            }
+        }
+        Ok(format!("{{\"ok\":true,\"converted\":{}}}", converted))
+    }
+
     /// 글상자(Shape) z-order 변경 (네이티브).
     /// operation: "front" | "back" | "forward" | "backward"
     pub fn change_shape_z_order_native(

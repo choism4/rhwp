@@ -1992,6 +1992,14 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 첫장 MEMO 묶음 박스를 편집 가능한 글상자(Rectangle + text_box)로 일괄 변환.
+    /// v4 ⑦ — MEMO 칸 텍스트 입력·서식(진하기/기울기/장평/자간) 가능화.
+    /// 반환: JSON `{"ok":true,"converted":N}`
+    #[wasm_bindgen(js_name = convertMemoBoxes)]
+    pub fn convert_memo_boxes(&mut self) -> Result<String, JsValue> {
+        self.convert_memo_boxes_native().map_err(|e| e.into())
+    }
+
     /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`
