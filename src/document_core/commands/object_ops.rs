@@ -2270,10 +2270,10 @@ impl DocumentCore {
         Ok(super::super::helpers::json_ok_with(&format!("\"paraIdx\":{},\"controlIdx\":{}", insert_para_idx, insert_ctrl_idx)))
     }
 
-    /// 기존 도형(예: MEMO 묶음 박스)을 편집 가능한 글상자(Rectangle + text_box)로
-    /// in-place 변환한다. 지오메트리(위치·크기·배치)와 테두리 박스는 보존하되,
-    /// 빈 편집 가능 문단을 가진 text_box 를 추가해 한컴에서 텍스트 입력·서식 변경이
-    /// 가능하도록 한다. script-ai v4 ⑦ — 첫장 MEMO 편집 가능화.
+    /// MEMO 묶음(Group) 프레임은 그대로 두고, 프레임 안쪽에 **투명·무테두리 편집 글상자**
+    /// (Rectangle + text_box)를 오버레이로 추가한다. 「MEMO」 머리글이 박힌 테두리 프레임
+    /// 구조를 보존하면서, 그 안에 텍스트 입력·서식 변경이 가능한 영역을 얹는다.
+    /// script-ai v4 ⑦ — 첫장 MEMO 편집 가능화 (프레임 보존형).
     pub fn convert_shape_to_textbox_native(
         &mut self,
         section_idx: usize,
@@ -2290,24 +2290,46 @@ impl DocumentCore {
             .ok_or_else(|| HwpError::RenderError(format!("문단 인덱스 {} 범위 초과", para_idx)))?;
         let default_char_shape_id: u32 = para.char_shapes.first().map(|c| c.char_shape_id).unwrap_or(0);
         let default_para_shape_id: u16 = para.para_shape_id;
-        let ctrl = para.controls.get(control_idx)
-            .ok_or_else(|| HwpError::RenderError(format!("컨트롤 인덱스 {} 범위 초과", control_idx)))?;
-        let mut common = match ctrl {
-            Control::Shape(s) => s.common().clone(),
+        let group_common = match para.controls.get(control_idx) {
+            Some(Control::Shape(s)) => s.common().clone(),
             _ => return Err(HwpError::RenderError("Shape 컨트롤이 아닙니다".to_string())),
         };
 
-        let width = common.width.max(1);
-        let height = common.height.max(1);
+        // 오버레이 글상자 지오메트리 — 프레임 안쪽. 상단은 「MEMO」 머리글 보더를 피해 inset.
+        const TOP_INSET: i32 = 1700;
+        const SIDE_INSET: i32 = 450;
+        const BOTTOM_INSET: i32 = 500;
+        let g_w = group_common.width as i32;
+        let g_h = group_common.height as i32;
+        let width: u32 = (g_w - SIDE_INSET * 2).max(1000) as u32;
+        let height: u32 = (g_h - TOP_INSET - BOTTOM_INSET).max(1000) as u32;
+        let tb_horz = (group_common.horizontal_offset as i32 + SIDE_INSET).max(0);
+        let tb_vert = (group_common.vertical_offset as i32 + TOP_INSET).max(0);
         let w_i = width as i32;
         let h_i = height as i32;
+        let new_z = self.max_shape_z_order_in_section(section_idx) + 1;
 
-        // 글상자용 공통 속성: 지오메트리 보존, ctrl_id='$rec', text 흐름 textbox attr.
-        common.ctrl_id = 0x24726563; // '$rec'
-        // attr: Para/Top/Column/Left/Square = 글상자 표준 (create_shape_control_native 참조).
-        common.attr = if common.treat_as_char { 0x0A0210 | 0x01 } else { 0x0A0210 };
+        // 글상자 공통 속성 — 프레임과 동일 기준(Paper)으로 절대 배치, 클릭 가능하게 InFrontOfText.
+        let common = CommonObjAttr {
+            ctrl_id: 0x24726563, // '$rec'
+            attr: 0x0A0210,      // 글상자 표준 (floating, non-treat-as-char)
+            vertical_offset: tb_vert as u32,
+            horizontal_offset: tb_horz as u32,
+            width,
+            height,
+            z_order: new_z,
+            // bit30(한컴 SubjectID 호환)은 유지 — wrapping_add 가 날릴 수 있어 OR 로 보장.
+            instance_id: group_common.instance_id.wrapping_add(0x4d454d4f) | 0x4000_0000,
+            treat_as_char: false,
+            vert_rel_to: group_common.vert_rel_to,
+            vert_align: group_common.vert_align,
+            horz_rel_to: group_common.horz_rel_to,
+            horz_align: group_common.horz_align,
+            text_wrap: TextWrap::InFrontOfText,
+            ..Default::default()
+        };
 
-        // 빈 편집 가능 문단 (글상자 내부)
+        // 빈 편집 가능 문단
         let tb_inner_width = width.saturating_sub(1020);
         let mut inner_raw_header_extra = vec![0u8; 10];
         inner_raw_header_extra[0..2].copy_from_slice(&1u16.to_le_bytes());
@@ -2348,8 +2370,8 @@ impl DocumentCore {
                 rotation_center: crate::model::Point { x: (width / 2) as i32, y: (height / 2) as i32 },
                 ..Default::default()
             },
-            // 테두리 보존: 얇은 실선 박스 (MEMO 외곽선 유지).
-            border_line: ShapeBorderLine { color: 0, width: 13, attr: 0xD1000041, outline_style: 0 },
+            // 무테두리(width 0) + 채우기 없음 → 투명 오버레이. 프레임 외곽선은 Group 이 그린다.
+            border_line: ShapeBorderLine { color: 0, width: 0, attr: 0xFF000000, outline_style: 0 },
             fill: Fill::default(),
             text_box: Some(TextBox {
                 list_attr: 0x20,
@@ -2374,10 +2396,28 @@ impl DocumentCore {
             y_coords: [0, 0, h_i, h_i],
         });
 
-        let para_mut = &mut self.document.sections[section_idx].paragraphs[para_idx];
-        para_mut.controls[control_idx] = Control::Shape(Box::new(rect));
-        if control_idx < para_mut.ctrl_data_records.len() {
-            para_mut.ctrl_data_records[control_idx] = None;
+        // --- 프레임 Group 바로 뒤에 새 컨트롤로 삽입 (Group 은 보존) ---
+        {
+            let paragraph = &mut self.document.sections[section_idx].paragraphs[para_idx];
+            let insert_idx = (control_idx + 1).min(paragraph.controls.len());
+            paragraph.controls.insert(insert_idx, Control::Shape(Box::new(rect)));
+            paragraph.ctrl_data_records.insert(insert_idx, None);
+            // char_offsets 에 raw offset 삽입 (확장 컨트롤 = 8 code units)
+            if !paragraph.char_offsets.is_empty() {
+                let raw_offset = if insert_idx > 0 && insert_idx <= paragraph.char_offsets.len() {
+                    paragraph.char_offsets[insert_idx - 1] + 8
+                } else {
+                    paragraph.char_offsets.first().map(|f| f.saturating_sub(8)).unwrap_or(0)
+                };
+                let pos = insert_idx.min(paragraph.char_offsets.len());
+                paragraph.char_offsets.insert(pos, raw_offset);
+                for co in paragraph.char_offsets.iter_mut().skip(pos + 1) {
+                    *co += 8;
+                }
+            }
+            paragraph.char_count += 8;
+            paragraph.control_mask |= 0x00000800;
+            paragraph.has_para_text = true;
         }
         self.document.sections[section_idx].raw_stream = None;
         self.document.doc_info.raw_stream_dirty = true;
