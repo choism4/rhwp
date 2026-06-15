@@ -557,6 +557,83 @@ impl DocumentCore {
         Ok(format!("{{\"ok\":true,\"borderFillId\":{}}}", new_id))
     }
 
+    /// 셀 내 모든 텍스트 런의 장평(char_shape.ratios)을 설정한다 (네이티브).
+    ///
+    /// `apply_char_format_in_cell` 과 달리 **recompose/reflow 를 하지 않는다.**
+    /// 본문 셀(폭 큼)에 ratio 를 주입할 때 reflow 가 cell inner_width 를 오산해
+    /// 텍스트가 1글자/줄로 깨지는 문제를 피하기 위함. 기존 char_shape 를 복제해
+    /// ratios 만 바꾼 새 char_shape 로 런을 재배정하고, line_segs 는 그대로 둔다
+    /// (렌더러가 글자 advance 에 ratio 를 적용 → 시각 압축, 줄바꿈 위치는 유지).
+    pub(crate) fn set_cell_char_ratio_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        ratio: u8,
+    ) -> Result<String, HwpError> {
+        // 1. 셀 런들의 기존 char_shape_id 수집 (중복 제거)
+        let old_ids: Vec<u32> = {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            let cell = table.cells.get(cell_idx)
+                .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+            let mut ids: Vec<u32> = Vec::new();
+            for para in &cell.paragraphs {
+                for cs in &para.char_shapes {
+                    if !ids.contains(&cs.char_shape_id) { ids.push(cs.char_shape_id); }
+                }
+            }
+            ids
+        };
+        if old_ids.is_empty() {
+            return Ok("{\"ok\":true,\"changed\":0}".to_string());
+        }
+
+        // 2. 각 char_shape 복제 → ratios 설정 → push, old→new 매핑
+        use std::collections::HashMap;
+        let mut id_map: HashMap<u32, u32> = HashMap::new();
+        for &old in &old_ids {
+            let mut cs = match self.document.doc_info.char_shapes.get(old as usize) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            if cs.ratios == [ratio; 7] {
+                id_map.insert(old, old); // 이미 동일 — 변경 불필요
+                continue;
+            }
+            cs.ratios = [ratio; 7];
+            cs.raw_data = None; // 모델 직렬화 강제 (ratio 변경 반영)
+            self.document.doc_info.char_shapes.push(cs);
+            let new_id = (self.document.doc_info.char_shapes.len() - 1) as u32;
+            id_map.insert(old, new_id);
+        }
+
+        // 3. 셀 런 char_shape_id 재배정
+        let mut changed = 0usize;
+        {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            let cell = table.cells.get_mut(cell_idx)
+                .ok_or_else(|| HwpError::RenderError(format!("셀 인덱스 {} 범위 초과", cell_idx)))?;
+            for para in &mut cell.paragraphs {
+                for cs in &mut para.char_shapes {
+                    if let Some(&new_id) = id_map.get(&cs.char_shape_id) {
+                        if new_id != cs.char_shape_id {
+                            cs.char_shape_id = new_id;
+                            changed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.document.doc_info.raw_stream_dirty = true;
+        if section_idx < self.document.sections.len() {
+            self.document.sections[section_idx].raw_stream = None;
+        }
+        self.styles = crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
+        Ok(format!("{{\"ok\":true,\"changed\":{}}}", changed))
+    }
+
     /// 셀 속성을 수정한다 (네이티브).
     pub(crate) fn set_cell_properties_native(
         &mut self,

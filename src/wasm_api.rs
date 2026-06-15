@@ -1969,6 +1969,29 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 셀 내 모든 텍스트 런의 장평(ratio)을 설정한다. recompose/reflow 없음.
+    /// v4 ⑤ — 본문 등장인물·대사·지문 장평 95%. applyCharFormatInCell 의 reflow
+    /// 가 본문 셀에서 1글자/줄로 깨지는 문제 회피.
+    /// 반환: JSON `{"ok":true,"changed":N}`
+    #[wasm_bindgen(js_name = setCellCharRatio)]
+    pub fn set_cell_char_ratio(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        ratio: u32,
+    ) -> Result<String, JsValue> {
+        self.set_cell_char_ratio_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            cell_idx as usize,
+            ratio as u8,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 여러 셀의 단순 속성(테두리 제외)을 한 번에 적용한다 (배치).
     ///
     /// json: `[{"cellIdx":0,"oneLineInput":true,"verticalAlign":1}, ...]`
