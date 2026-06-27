@@ -270,8 +270,34 @@ fn write_sub_list<W: Write>(
         write_cell_text(w, &para.text)?;
         end_tag(w, "hp:run")?;
 
-        // <hp:linesegarray> 최소 1개 lineseg
-        start_tag(w, "hp:linesegarray")?;
+        // <hp:linesegarray> — IR의 실제 line_segs 배열을 직렬화한다.
+        // (v5 ⑦-A) 과거에는 단일 하드코딩 lineseg(vertsize=1000 고정)만 출력해 멀티라인
+        // 셀이 1줄 높이로 붕괴됐다. 이제 파서가 채운 LineSeg 배열을 그대로 보존해
+        // 줄 수/높이/베이스라인을 한컴 원본과 일치시킨다. (section.rs 와 동일 정책)
+        write_cell_linesegarray(w, para)?;
+
+        end_tag(w, "hp:p")?;
+    }
+
+    end_tag(w, "hp:subList")?;
+    Ok(())
+}
+
+/// `<hp:linesegarray>` — 셀 문단의 LineSeg 배열을 IR 값 그대로 직렬화한다.
+///
+/// (v5 ⑦-A) `para.line_segs` 가 비어있지 않으면 각 LineSeg 의 9개 필드
+/// (textpos/vertpos/vertsize/textheight/baseline/spacing/horzpos/horzsize/flags)
+/// 를 그대로 출력한다. 문단이 2줄이면 lineseg 2개가 나가 셀 행 높이가 보존된다.
+/// `line_segs` 가 비어있을 때만(예: 합성 빈 셀) 기존 단일 정적 lineseg 로 폴백한다.
+///
+/// 속성/필드 매핑은 `section.rs::render_lineseg_array_from_ir` 와 동일하다.
+fn write_cell_linesegarray<W: Write>(
+    w: &mut Writer<W>,
+    para: &crate::model::paragraph::Paragraph,
+) -> Result<(), SerializeError> {
+    start_tag(w, "hp:linesegarray")?;
+    if para.line_segs.is_empty() {
+        // 폴백: IR 에 line_segs 가 없을 때만 (Document::default 합성 셀 등).
         empty_tag(
             w,
             "hp:lineseg",
@@ -287,12 +313,35 @@ fn write_sub_list<W: Write>(
                 ("flags", "393216"),
             ],
         )?;
-        end_tag(w, "hp:linesegarray")?;
-
-        end_tag(w, "hp:p")?;
+    } else {
+        for seg in &para.line_segs {
+            let textpos = seg.text_start.to_string();
+            let vertpos = seg.vertical_pos.to_string();
+            let vertsize = seg.line_height.to_string();
+            let textheight = seg.text_height.to_string();
+            let baseline = seg.baseline_distance.to_string();
+            let spacing = seg.line_spacing.to_string();
+            let horzpos = seg.column_start.to_string();
+            let horzsize = seg.segment_width.to_string();
+            let flags = seg.tag.to_string();
+            empty_tag(
+                w,
+                "hp:lineseg",
+                &[
+                    ("textpos", &textpos),
+                    ("vertpos", &vertpos),
+                    ("vertsize", &vertsize),
+                    ("textheight", &textheight),
+                    ("baseline", &baseline),
+                    ("spacing", &spacing),
+                    ("horzpos", &horzpos),
+                    ("horzsize", &horzsize),
+                    ("flags", &flags),
+                ],
+            )?;
+        }
     }
-
-    end_tag(w, "hp:subList")?;
+    end_tag(w, "hp:linesegarray")?;
     Ok(())
 }
 
@@ -537,5 +586,83 @@ mod tests {
         write_table(&mut w, &t, &mut ctx).unwrap();
         // 99 는 등록되지 않은 borderFill → unresolved
         assert!(ctx.border_fill_ids.unresolved().contains(&99u16));
+    }
+
+    /// (v5 ⑦-A) 멀티라인 셀: 문단에 LineSeg 2개가 있으면 lineseg 2개가
+    /// IR 실값으로 직렬화되어야 한다 (과거: 단일 1000 고정값으로 붕괴).
+    #[test]
+    fn multiline_cell_emits_lineseg_per_ir_seg() {
+        use crate::model::paragraph::LineSeg;
+
+        let mut t = empty_table(1, 1);
+        // 셀 문단을 2줄짜리(LineSeg 2개)로 교체
+        let mut para = Paragraph::default();
+        para.text = "두 줄 셀".to_string();
+        para.line_segs = vec![
+            LineSeg {
+                text_start: 0,
+                vertical_pos: 0,
+                line_height: 1600,
+                text_height: 1400,
+                baseline_distance: 1190,
+                line_spacing: 480,
+                column_start: 0,
+                segment_width: 9000,
+                tag: 0x00060000,
+            },
+            LineSeg {
+                text_start: 3,
+                vertical_pos: 1600,
+                line_height: 1600,
+                text_height: 1400,
+                baseline_distance: 1190,
+                line_spacing: 480,
+                column_start: 0,
+                segment_width: 9000,
+                tag: 0,
+            },
+        ];
+        t.cells[0].paragraphs = vec![para];
+
+        let xml = serialize(&t);
+        assert_eq!(
+            xml.matches("<hp:lineseg ").count(),
+            2,
+            "멀티라인 셀은 lineseg 2개여야 함: {}",
+            xml
+        );
+        // IR 실값(vertsize=1600)이 출력되고 1000 고정값이 아님
+        assert!(
+            xml.contains(r#"vertsize="1600""#),
+            "vertsize 가 IR 실값(1600)이어야 함: {}",
+            xml
+        );
+        assert!(
+            !xml.contains(r#"vertsize="1000""#),
+            "고정 1000 lineseg 가 남아있으면 안 됨: {}",
+            xml
+        );
+        // 둘째 줄 vertpos 가 보존되어 행 높이가 붕괴되지 않음
+        assert!(
+            xml.contains(r#"vertpos="1600""#),
+            "둘째 줄 vertpos(1600) 보존 실패: {}",
+            xml
+        );
+    }
+
+    /// `line_segs` 가 비어있으면 폴백 단일 lineseg 를 그대로 출력한다 (합성 빈 셀).
+    #[test]
+    fn empty_linesegs_cell_falls_back_to_single() {
+        let mut t = empty_table(1, 1);
+        // Paragraph::default() 는 line_segs 가 비어있음
+        assert!(t.cells[0].paragraphs[0].line_segs.is_empty());
+        let xml = serialize(&t);
+        assert_eq!(
+            xml.matches("<hp:lineseg ").count(),
+            1,
+            "빈 line_segs 셀은 폴백 단일 lineseg: {}",
+            xml
+        );
+        assert!(xml.contains(r#"vertsize="1000""#), "폴백 정적값: {}", xml);
     }
 }
