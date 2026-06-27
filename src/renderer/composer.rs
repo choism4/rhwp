@@ -965,6 +965,108 @@ pub fn recompose_for_cell_width(
     composed.lines = split_composed_line_by_width(&single_line, cell_inner_width_px, styles);
 }
 
+/// [결함 ⑤] line_segs 가 이미 인코딩된 셀 paragraph 에서, 개별 ComposedLine 의
+/// 자연 폭(letter_spacing=0)이 셀 inner 폭을 초과하면 그 줄만 글자 경계로 재분할한다.
+///
+/// 배경: 본 환경의 line_segs 는 WASM 측 `reflow_line_segs` 가 생성하는데, WASM 의
+/// 폰트 폭 측정(globalThis.measureTextWidth 폴리필)이 부정확해 공백 없는 긴 한글
+/// 토큰(예: "어뜩하라구우우우우우우~")을 "셀에 맞는다"고 오판하여 한 line_seg 로
+/// 남긴다. 네이티브 렌더러는 실제 폰트 메트릭으로 측정하므로 같은 줄이 셀 폭을
+/// 초과 → `paragraph_layout.rs` 의 음수 자간(−50%) 압축 분기로 글자가 겹쳐 그려지고
+/// 셀 우측 경계를 넘는다.
+///
+/// 본 함수는 압축 분기 진입 전에, 공백 없는 단일 토큰이 셀 폭을 크게(≥1.3배)
+/// 초과하는 줄에 한해 단어→글자 경계 재분할을 적용한다. `recompose_for_cell_width`
+/// 와 달리 line_segs 가 비어 있지 않아도 동작하되, 다음 가드로 회귀를 차단한다:
+/// - 셀(또는 글상자) 문맥에서만 호출 (호출부가 inner_width 보장, 세로쓰기 제외)
+/// - `single_line`(한 줄로 입력) paragraph 는 분할 안 함
+/// - "줄 안의 공백 없는 최대 토큰" 자연 폭이 셀 폭의 1.3배를 넘는 줄만 분할
+///   (일반 줄·소폭 초과 줄 불변 → 페이지수 불변, 한컴 인코딩 표 무영향)
+/// - 탭/글자겹침/각주 마커가 있는 줄은 건드리지 않음 (정렬·합성 의존)
+pub fn resplit_overflowing_cell_lines(
+    composed: &mut ComposedParagraph,
+    para: &Paragraph,
+    cell_inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+) {
+    if cell_inner_width_px <= 0.0 {
+        return;
+    }
+    if composed.lines.is_empty() {
+        return;
+    }
+    // "한 줄로 입력" 옵션이면 줄 분할 금지 (recompose_for_cell_width 와 동일 정책).
+    if let Some(ps) = styles.para_styles.get(para.para_shape_id as usize) {
+        if ps.single_line {
+            return;
+        }
+    }
+    // 분할 불가(탭/글자겹침/각주) 줄 판정.
+    let is_resplittable = |line: &ComposedLine| -> bool {
+        line.runs.iter().all(|r| {
+            r.char_overlap.is_none()
+                && r.footnote_marker.is_none()
+                && !r.text.contains('\t')
+        })
+    };
+
+    // [회귀 차단] 본 함수의 동작 대상은 "공백 없는 단일 토큰이 셀 폭을 넘어
+    // 음수 자간 압축으로 빠지는" 줄로 한정한다. 일반 다어절 줄은 WASM 이 (부정확
+    // 하더라도) 단어 경계로 줄나눔해 둔 상태이며, 네이티브 폰트 메트릭 차이로
+    // 줄 전체 자연 폭이 셀을 약간 넘더라도 재분할하면 안 된다(페이지수 폭증).
+    // 따라서 "줄 안의 공백 없는 최대 토큰" 자연 폭이 셀 폭을 넘을 때만 재분할한다.
+    // 그 경우에만 split_composed_line_by_width 가 그 토큰을 글자 경계로 쪼갠다.
+    let max_run_token_width = |line: &ComposedLine| -> f64 {
+        let mut max_w = 0.0f64;
+        for run in &line.runs {
+            let mut ts = resolved_to_text_style(styles, run.char_style_id, run.lang_index);
+            if ts.letter_spacing < 0.0 {
+                ts.letter_spacing = 0.0;
+            }
+            let disp = effective_text_for_metrics(run);
+            for token in disp.split([' ', '\t']) {
+                if token.is_empty() { continue; }
+                let w = estimate_text_width(token, &ts);
+                if w > max_w { max_w = w; }
+            }
+        }
+        max_w
+    };
+
+    // [회귀 차단] 무공백 토큰이 셀 폭을 "충분히 크게" 넘을 때만 재분할한다.
+    //
+    // 정상적으로 한컴이 인코딩한 표(예: samples/aift.hwp)의 셀 레이블 토큰은
+    // 네이티브 폰트 메트릭이 한컴보다 1~23% 넓게 측정되는 경우가 흔하다. 이때
+    // 재분할하면 멀쩡한 줄이 쪼개져 페이지 분할이 어긋난다(쪽번호 소실 등).
+    // 한컴 편집기는 이 정도 초과는 음수 자간으로 흡수해 한 줄로 둔다.
+    //
+    // 본 결함(우리 생성 HWP의 WASM 측정 오차로 남은 긴 무공백 토큰)은 셀 폭의
+    // 1.4배 이상으로 크게 초과하여 네이티브 압축이 −50% 자간 클램프를 쳐
+    // 글자가 겹치고 셀 경계를 넘는다. 두 군집(≤1.23 vs ≥1.42) 사이 임계값으로
+    // 1.3 을 둔다. 이 비율 이하의 초과는 기존 압축 동작(한컴 정합)에 맡긴다.
+    const RESPLIT_OVERFLOW_RATIO: f64 = 1.3;
+    let overflow_threshold = cell_inner_width_px * RESPLIT_OVERFLOW_RATIO;
+
+    let mut new_lines: Vec<ComposedLine> = Vec::with_capacity(composed.lines.len());
+    for line in std::mem::take(&mut composed.lines) {
+        // 단일 무공백 토큰이 셀 폭을 1.3배 넘는 줄만 재분할 대상.
+        let has_overflow_token = max_run_token_width(&line) > overflow_threshold;
+        if has_overflow_token && is_resplittable(&line) {
+            // 단어 우선, 무공백 초과 토큰은 글자 경계로 분할. split 결과가 1줄
+            // (단일 글자가 셀보다 넓음)이면 원본 유지 → 압축 분기가 폴백.
+            let parts = split_composed_line_by_width(&line, cell_inner_width_px, styles);
+            if parts.len() > 1 {
+                new_lines.extend(parts);
+            } else {
+                new_lines.push(line);
+            }
+        } else {
+            new_lines.push(line);
+        }
+    }
+    composed.lines = new_lines;
+}
+
 /// 단일 ComposedLine 을 셀 가용 너비에 맞춰 다중 ComposedLine 으로 분할.
 ///
 /// 분할 단위: 공백 단어 경계 우선, 단일 단어가 너비 초과 시 글자 단위 break.

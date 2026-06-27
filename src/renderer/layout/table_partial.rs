@@ -109,12 +109,20 @@ impl LayoutEngine {
                     // atomic 처리를 정확히 수행하므로 별도 분기 불필요.
                     // [Task #671] line_segs 비어 있는 셀 paragraph 의 단일 ComposedLine
                     // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
+                    let cell_is_horizontal = cell.text_direction == 0;
                     let composed: Vec<_> = cell.paragraphs.iter()
                         .map(|p| {
                             let mut comp = compose_paragraph(p);
                             crate::renderer::composer::recompose_for_cell_width(
                                 &mut comp, p, inner_width, styles,
                             );
+                            // [결함 ⑤] 긴 토큰 줄 재분할 — 분할 행 높이 일관성.
+                            // 세로쓰기 셀은 가로 줄나눔 미적용.
+                            if cell_is_horizontal {
+                                crate::renderer::composer::resplit_overflowing_cell_lines(
+                                    &mut comp, p, inner_width, styles,
+                                );
+                            }
                             comp
                         })
                         .collect();
@@ -468,6 +476,13 @@ impl LayoutEngine {
                     crate::renderer::composer::recompose_for_cell_width(
                         comp, para, inner_width, styles,
                     );
+                    // [결함 ⑤] 긴 토큰 줄 재분할 — 분할 표 렌더 일관성.
+                    // 세로쓰기 셀은 별도 vertical 레이아웃이라 가로 줄나눔 미적용.
+                    if cell.text_direction == 0 {
+                        crate::renderer::composer::resplit_overflowing_cell_lines(
+                            comp, para, inner_width, styles,
+                        );
+                    }
                 }
             }
 

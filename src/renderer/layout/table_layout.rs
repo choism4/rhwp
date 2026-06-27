@@ -790,6 +790,10 @@ impl LayoutEngine {
                 crate::renderer::composer::recompose_for_cell_width(
                     &mut comp, p, cell_inner_width_px, styles,
                 );
+                // [결함 ⑤] 렌더 경로와 동일하게 긴 토큰 줄 재분할 — 셀 높이 일관성.
+                crate::renderer::composer::resplit_overflowing_cell_lines(
+                    &mut comp, p, cell_inner_width_px, styles,
+                );
                 self.calc_para_lines_height(&comp.lines, pidx, cell_para_count,
                     styles.para_styles.get(p.para_shape_id as usize), styles)
             })
@@ -1361,6 +1365,14 @@ impl LayoutEngine {
                     crate::renderer::composer::recompose_for_cell_width(
                         comp, para, inner_width, styles,
                     );
+                    // [결함 ⑤] line_segs 가 인코딩돼 있어도 공백 없는 긴 한글 토큰이
+                    // 셀 폭을 넘으면 글자 경계로 재분할 (음수 자간 압축·셀 경계 초과 방지).
+                    // 세로쓰기 셀은 가로 줄나눔 미적용.
+                    if cell.text_direction == 0 {
+                        crate::renderer::composer::resplit_overflowing_cell_lines(
+                            comp, para, inner_width, styles,
+                        );
+                    }
                 }
             }
 

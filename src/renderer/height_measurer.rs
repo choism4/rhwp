@@ -480,7 +480,24 @@ impl HeightMeasurer {
         }
 
         let row_count = table.row_count as usize;
+        let col_count = table.col_count as usize;
         let mut row_heights = vec![0.0f64; row_count];
+
+        // [결함 ⑤] 열별 최대 폭(단일 col_span 기준) 그리드. 본 환경 스켈레톤은 일부
+        // 본문 셀의 cell.width 를 6 HWPUNIT(≈0) 으로 저장 — 렌더는 열 그리드 폭으로
+        // 배치하나 높이 측정이 cell.width 를 그대로 쓰면 inner_width≈0 → 긴 토큰
+        // 재분할이 누락되어 행 높이가 1줄 부족 → 다음 행과 겹친다. 렌더와 동일하게
+        // 열 그리드 폭으로 보정한다 (resolve_column_widths 의 1단계와 동치).
+        let col_grid_widths: Vec<f64> = {
+            let mut cw = vec![0.0f64; col_count.max(1)];
+            for c in &table.cells {
+                if c.col_span == 1 && (c.col as usize) < col_count && c.width < 0x80000000 {
+                    let w = hwpunit_to_px(c.width as i32, self.dpi);
+                    if w > cw[c.col as usize] { cw[c.col as usize] = w; }
+                }
+            }
+            cw
+        };
 
         // 1단계: row_span==1인 셀에서 행별 최대 높이 추출
         // cell.height는 HWP가 저장한 셀 높이 (pad + content, trailing ls 미포함)
@@ -527,10 +544,25 @@ impl HeightMeasurer {
                 } else {
                     hwpunit_to_px(table.padding.right as i32, self.dpi)
                 };
-                let cell_w_px = if cell.width < 0x80000000 {
+                let cell_w_px_raw = if cell.width < 0x80000000 {
                     hwpunit_to_px(cell.width as i32, self.dpi)
                 } else {
                     0.0
+                };
+                // [결함 ⑤] cell.width 가 퇴화값(스켈레톤 6 HWPUNIT≈0.08px)이라
+                // 자기 패딩조차 못 담는 경우에만 열 그리드 폭(col_span 합산)으로 보정한다.
+                // 렌더는 열 그리드로 셀을 배치하므로 높이 측정도 동일 폭을 써야 긴 토큰
+                // 재분할이 일관되게 반영된다. 일반적인(유효한) cell.width 는 건드리지
+                // 않아 다른 문서 회귀를 차단한다.
+                let cell_col = cell.col as usize;
+                let cell_grid_w: f64 = (cell_col..(cell_col + cell.col_span as usize).min(col_count))
+                    .map(|i| col_grid_widths.get(i).copied().unwrap_or(0.0))
+                    .sum();
+                let cell_width_degenerate = cell_w_px_raw <= pad_left + pad_right;
+                let cell_w_px = if cell_width_degenerate && cell_grid_w > cell_w_px_raw {
+                    cell_grid_w
+                } else {
+                    cell_w_px_raw
                 };
                 let cell_inner_width = (cell_w_px - pad_left - pad_right).max(0.0);
 
@@ -559,6 +591,10 @@ impl HeightMeasurer {
                             // 단, 셀의 "한 줄로 입력" 옵션이 켜져 있으면 split 하지 않는다.
                             if !cell.one_line_input {
                                 crate::renderer::composer::recompose_for_cell_width(
+                                    &mut comp, p, cell_inner_width, styles,
+                                );
+                                // [결함 ⑤] 긴 토큰 줄 재분할 — 렌더 경로와 높이 일관성.
+                                crate::renderer::composer::resplit_overflowing_cell_lines(
                                     &mut comp, p, cell_inner_width, styles,
                                 );
                             }
@@ -718,10 +754,25 @@ impl HeightMeasurer {
                      if cell.padding.right != 0 { hwpunit_to_px(cell.padding.right as i32, self.dpi) }
                      else { hwpunit_to_px(table.padding.right as i32, self.dpi) })
                 };
-                let cell_w_px = if cell.width < 0x80000000 {
+                let cell_w_px_raw = if cell.width < 0x80000000 {
                     hwpunit_to_px(cell.width as i32, self.dpi)
                 } else {
                     0.0
+                };
+                // [결함 ⑤] cell.width 가 퇴화값(스켈레톤 6 HWPUNIT≈0.08px)이라
+                // 자기 패딩조차 못 담는 경우에만 열 그리드 폭(col_span 합산)으로 보정한다.
+                // 렌더는 열 그리드로 셀을 배치하므로 높이 측정도 동일 폭을 써야 긴 토큰
+                // 재분할이 일관되게 반영된다. 일반적인(유효한) cell.width 는 건드리지
+                // 않아 다른 문서 회귀를 차단한다.
+                let cell_col = cell.col as usize;
+                let cell_grid_w: f64 = (cell_col..(cell_col + cell.col_span as usize).min(col_count))
+                    .map(|i| col_grid_widths.get(i).copied().unwrap_or(0.0))
+                    .sum();
+                let cell_width_degenerate = cell_w_px_raw <= pad_left + pad_right;
+                let cell_w_px = if cell_width_degenerate && cell_grid_w > cell_w_px_raw {
+                    cell_grid_w
+                } else {
+                    cell_w_px_raw
                 };
                 let cell_inner_width = (cell_w_px - pad_left - pad_right).max(0.0);
                 let text_height: f64 = if cell.text_direction != 0 {
@@ -744,6 +795,10 @@ impl HeightMeasurer {
                             // 압축 결과를 셀 가용 너비에 맞춰 다중 ComposedLine 으로 재분할.
                             if !cell.one_line_input {
                                 crate::renderer::composer::recompose_for_cell_width(
+                                    &mut comp, p, cell_inner_width, styles,
+                                );
+                                // [결함 ⑤] 긴 토큰 줄 재분할 — 렌더 경로와 높이 일관성.
+                                crate::renderer::composer::resplit_overflowing_cell_lines(
                                     &mut comp, p, cell_inner_width, styles,
                                 );
                             }
