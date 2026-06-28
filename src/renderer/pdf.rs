@@ -485,11 +485,18 @@ fn merge_ascii_text_runs(svg: &str) -> String {
             continue;
         };
 
+        // 렌더러(svg.rs)는 ASCII 클러스터마다 글자별 advance 에 맞춘 textLength/
+        // lengthAdjust 를 붙인다(글자별 값이 달라짐). 이를 style 비교/출력에서 제거해야
+        // S#11. 같은 마커 런이 단어 단위로 병합돼 자연 advance 를 쓰고 글리프 겹침이
+        // 사라진다(병합 안 하면 글자별 baked 좌표가 그대로 남아 …—.~ 외 #+숫자 등에서
+        // 겹침 발생). 병합 출력에도 textLength 가 없어야 자연 kerning 이 적용된다.
+        let run_style = strip_text_length_attrs(run.style_attrs);
+
         if let Some(existing) = &mut pending {
             // 스타일·y·scale 완전일치만 병합 (cross-style 오병합 차단).
             if existing.y == run.y
                 && existing.scale.as_deref() == run.scale
-                && existing.style_attrs == run.style_attrs
+                && existing.style_attrs == run_style
             {
                 existing.text.push_str(run.payload);
                 existing.last_x = run.x;
@@ -498,13 +505,13 @@ fn merge_ascii_text_runs(svg: &str) -> String {
         }
 
         flush_pending(&mut out, &mut pending);
-        let font_size = parse_font_size(run.style_attrs).unwrap_or(16.0);
+        let font_size = parse_font_size(&run_style).unwrap_or(16.0);
         pending = Some(AsciiRun {
             text: run.payload.to_string(),
             y: run.y.to_string(),
             scale: run.scale.map(str::to_string),
             lead: run.lead.to_string(),
-            style_attrs: run.style_attrs.to_string(),
+            style_attrs: run_style,
             first_x: run.x,
             last_x: run.x,
             font_size,
@@ -513,6 +520,39 @@ fn merge_ascii_text_runs(svg: &str) -> String {
 
     flush_pending(&mut out, &mut pending);
     out
+}
+
+/// SVG `<text>` style 속성에서 `textLength="..."` / `lengthAdjust="..."` 를 제거한다.
+/// 렌더러가 글자별 advance 로 붙인 값이라 마커 런 병합(자연 advance 사용)을 막으므로,
+/// 병합 비교·출력 단계에서만 떼어낸다(원본 SVG 의 한글 본문 텍스트에는 영향 없음).
+#[cfg(not(target_arch = "wasm32"))]
+fn strip_text_length_attrs(style: &str) -> String {
+    let mut out = String::with_capacity(style.len());
+    let mut rest = style;
+    loop {
+        let next = ["textLength=\"", "lengthAdjust=\""]
+            .iter()
+            .filter_map(|m| rest.find(m).map(|i| (i, m.len())))
+            .min_by_key(|&(i, _)| i);
+        match next {
+            Some((i, marker_len)) => {
+                out.push_str(&rest[..i]);
+                // 값의 닫는 따옴표까지 건너뛴다.
+                let after = &rest[i + marker_len..];
+                if let Some(q) = after.find('"') {
+                    rest = &after[q + 1..];
+                } else {
+                    rest = "";
+                }
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    // 제거로 생긴 이중 공백 정리(렌더 무해하지만 정돈).
+    out.replace("  ", " ").trim_end().to_string()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -700,8 +740,12 @@ pub fn svg_to_pdf(svg_content: &str) -> Result<Vec<u8>, String> {
     let svg_with_fallback = add_font_fallbacks(svg_content);
     let tree = usvg::Tree::from_str(&svg_with_fallback, &options)
         .map_err(|e| format!("SVG 파싱 실패: {}", e))?;
-    let pdf = svg2pdf::to_pdf(&tree, svg2pdf::ConversionOptions::default(), svg2pdf::PageOptions::default())
-        .map_err(|e| format!("PDF 변환 실패: {:?}", e))?;
+    let pdf = svg2pdf::to_pdf(
+        &tree,
+        svg2pdf::ConversionOptions::default(),
+        svg2pdf::PageOptions::default(),
+    )
+    .map_err(|e| format!("PDF 변환 실패: {:?}", e))?;
     Ok(pdf)
 }
 
@@ -715,7 +759,7 @@ pub fn svgs_to_pdf(svg_pages: &[String]) -> Result<Vec<u8>, String> {
         return svg_to_pdf(&svg_pages[0]);
     }
 
-    use pdf_writer::{Pdf, Ref, Finish};
+    use pdf_writer::{Finish, Pdf, Ref};
     use std::collections::HashMap;
 
     let fontdb = create_fontdb();
@@ -748,7 +792,12 @@ pub fn svgs_to_pdf(svg_pages: &[String]) -> Result<Vec<u8>, String> {
         let w = tree.size().width() * dpi_ratio;
         let h = tree.size().height() * dpi_ratio;
 
-        page_datas.push(PageData { chunk, svg_ref, width: w, height: h });
+        page_datas.push(PageData {
+            chunk,
+            svg_ref,
+            width: w,
+            height: h,
+        });
     }
 
     // 각 chunk를 재번호화하고 페이지 참조 수집
@@ -763,9 +812,9 @@ pub fn svgs_to_pdf(svg_pages: &[String]) -> Result<Vec<u8>, String> {
 
         // chunk 재번호화
         let mut map = HashMap::new();
-        let renumbered = pd.chunk.renumber(|old| {
-            *map.entry(old).or_insert_with(|| alloc.bump())
-        });
+        let renumbered = pd
+            .chunk
+            .renumber(|old| *map.entry(old).or_insert_with(|| alloc.bump()));
 
         let remapped_svg_ref = map.get(&pd.svg_ref).copied().unwrap_or(pd.svg_ref);
         svg_refs_remapped.push(remapped_svg_ref);
@@ -812,7 +861,8 @@ pub fn svgs_to_pdf(svg_pages: &[String]) -> Result<Vec<u8>, String> {
 
     // 문서 정보
     let info_ref = alloc.bump();
-    pdf.document_info(info_ref).producer(pdf_writer::TextStr("rhwp"));
+    pdf.document_info(info_ref)
+        .producer(pdf_writer::TextStr("rhwp"));
 
     Ok(pdf.finish())
 }

@@ -93,6 +93,8 @@ export class InputHandler {
   private tableObjectRenderer: TableObjectRenderer | null = null;
   private tableResizeRenderer: TableResizeRenderer | null = null;
   private pictureObjectRenderer: TableObjectRenderer | null = null;
+  /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
+  private rhwpClipboardToken: string | null = null;
 
   // 마우스 드래그 선택 상태
   private isDragging = false;
@@ -1016,6 +1018,19 @@ export class InputHandler {
 
     const hit = this.hitTestFromClientPoint(this.dragLastClientX, this.dragLastClientY);
     if (hit && hit.paragraphIndex < 0xFFFFFF00) {
+      // [Issue #669] 셀 내부 드래그: anchor와 같은 셀 컨텍스트인 경우만 커서 이동.
+      // 셀↔본문 혼합은 선택 렌더링 불가이므로 무시 (셀 내 선택 유지).
+      const sel = this.cursor.getSelection();
+      if (sel) {
+        const anchorInCell = sel.anchor.parentParaIndex !== undefined;
+        const hitInSameCell = anchorInCell &&
+          hit.parentParaIndex === sel.anchor.parentParaIndex &&
+          hit.controlIndex === sel.anchor.controlIndex &&
+          hit.cellIndex === sel.anchor.cellIndex;
+        if (anchorInCell && !hitInSameCell) {
+          return;
+        }
+      }
       this.cursor.moveTo(hit);
       this.updateCaretDuringDrag();
     }
@@ -1106,6 +1121,52 @@ export class InputHandler {
     } catch {
       return false;
     }
+  }
+
+  /** [Task #919] 클릭 좌표가 (sec, ppi, ci) 글상자의 외곽 경계선 위인지 판정.
+   *  isShapeBorderClick(picture 모듈) 의 sec/ppi/ci 변형 — getShapeBBox API 사용
+   *  tolerance 5px 한컴 정합 (Native bbox + 5px 안). */
+  isShapeBorderClickByRef(
+    pageX: number, pageY: number,
+    sec: number, ppi: number, ci: number,
+  ): boolean {
+    try {
+      const bbox = this.wasm.getShapeBBox(sec, ppi, ci);
+      const tolerance = 5;
+      const nearLeft = Math.abs(pageX - bbox.x) <= tolerance;
+      const nearRight = Math.abs(pageX - (bbox.x + bbox.width)) <= tolerance;
+      const nearTop = Math.abs(pageY - bbox.y) <= tolerance;
+      const nearBottom = Math.abs(pageY - (bbox.y + bbox.height)) <= tolerance;
+      const inVertRange = pageY >= bbox.y - tolerance && pageY <= bbox.y + bbox.height + tolerance;
+      const inHorzRange = pageX >= bbox.x - tolerance && pageX <= bbox.x + bbox.width + tolerance;
+      return (nearLeft && inVertRange) || (nearRight && inVertRange) ||
+             (nearTop && inHorzRange) || (nearBottom && inHorzRange);
+    } catch {
+      return false;
+    }
+  }
+
+  /** [Task #919] 클릭 좌표 근처에 글상자가 있는지 확인 (글상자 바깥에서 외곽 근처 클릭) */
+  findShapeByOuterClick(
+    pageX: number, pageY: number,
+    sec: number, paragraphIndex: number,
+  ): { sec: number; ppi: number; ci: number } | null {
+    // 현재 문단 및 인접 문단 (±2) 검사 — findTableByOuterClick 동일 패턴
+    for (let offset = 0; offset <= 2; offset++) {
+      const candidates = offset === 0
+        ? [paragraphIndex]
+        : [paragraphIndex - offset, paragraphIndex + offset];
+      for (const ppi of candidates) {
+        if (ppi < 0) continue;
+        // Shape 컨트롤은 paragraph 의 어느 위치든 있을 수 있으므로 0..N 시도
+        for (let ci = 0; ci < 10; ci++) {
+          if (this.isShapeBorderClickByRef(pageX, pageY, sec, ppi, ci)) {
+            return { sec, ppi, ci };
+          }
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -1546,6 +1607,7 @@ export class InputHandler {
   /** 편집 후 처리: 재렌더링 + 캐럿 갱신 */
   private afterEdit(): void {
     this.lastCellKey = null; // 편집 후 셀 bbox 캐시 무효화
+    this.eventBus.emit('document-mutated', 'input-handler-edit');
     this.eventBus.emit('document-changed');
     this.updateCaret();
   }
@@ -2073,8 +2135,8 @@ export class InputHandler {
   /** 그림 객체 선택 모드인가? */
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }
 
-  /** 선택된 그림/글상자 참조 반환 */
-  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line'; cellIdx?: number; cellParaIdx?: number } | null { return this.cursor.getSelectedPictureRef(); }
+  /** 선택된 그림/글상자 참조 반환 ([Task #825] headerFooter 동반 시 머리말/꼬리말 picture marker) */
+  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line'; cellIdx?: number; cellParaIdx?: number; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
 
   /** 다중 선택된 개체 목록 */
   getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string }[] { return this.cursor.getSelectedPictureRefs(); }
@@ -2324,11 +2386,13 @@ export class InputHandler {
           const text = this.wasm.getClipboardText() || '[그림]';
           let html = '';
           try { html = this.wasm.exportControlHtml(ref.sec, ref.ppi, ref.ci) || ''; } catch { /* 무시 */ }
+          const markedHtml = _keyboard.prepareRhwpInternalClipboardHtml(this, html, text);
           if (ref.type === 'image') {
-            _keyboard.writeImageToClipboard(this.wasm, ref.sec, ref.ppi, ref.ci, text, html)
+            _keyboard.writeImageToClipboard(this.wasm, ref.sec, ref.ppi, ref.ci, text, markedHtml)
               .catch(() => navigator.clipboard.writeText(text).catch(() => {}));
           } else {
-            navigator.clipboard.writeText(text).catch(() => {});
+            _keyboard.writeTextHtmlToClipboard(text, markedHtml)
+              .catch(() => navigator.clipboard.writeText(text).catch(() => {}));
           }
         } catch (err) {
           console.warn('[InputHandler] 개체 복사 실패:', err);
@@ -2342,7 +2406,11 @@ export class InputHandler {
         try {
           this.wasm.copyControl(ref.sec, ref.ppi, ref.ci);
           const text = this.wasm.getClipboardText() || '[표]';
-          navigator.clipboard.writeText(text).catch(() => {});
+          let html = '';
+          try { html = this.wasm.exportControlHtml(ref.sec, ref.ppi, ref.ci) || ''; } catch { /* 무시 */ }
+          const markedHtml = _keyboard.prepareRhwpInternalClipboardHtml(this, html, text);
+          _keyboard.writeTextHtmlToClipboard(text, markedHtml)
+            .catch(() => navigator.clipboard.writeText(text).catch(() => {}));
         } catch (err) {
           console.warn('[InputHandler] 표 복사 실패:', err);
         }
@@ -2352,6 +2420,12 @@ export class InputHandler {
     // 텍스트 선택 → textarea 포커스 후 execCommand
     this.focusTextarea();
     document.execCommand('copy');
+  }
+
+  /** 붙이기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
+  performPaste(): boolean {
+    this.focusTextarea();
+    return document.execCommand('paste');
   }
 
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */

@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 fn check_snapshot(hwpx_relpath: &str, page: u32, golden_name: &str) {
     let repo_root = env!("CARGO_MANIFEST_DIR");
     let hwpx_path = Path::new(repo_root).join(hwpx_relpath);
-    let bytes = fs::read(&hwpx_path)
-        .unwrap_or_else(|e| panic!("read {}: {}", hwpx_path.display(), e));
+    let bytes =
+        fs::read(&hwpx_path).unwrap_or_else(|e| panic!("read {}: {}", hwpx_path.display(), e));
 
     let doc = rhwp::wasm_api::HwpDocument::from_bytes(&bytes)
         .unwrap_or_else(|e| panic!("parse {}: {}", hwpx_relpath, e));
@@ -84,6 +84,11 @@ fn check_snapshot(hwpx_relpath: &str, page: u32, golden_name: &str) {
 
 #[test]
 fn form_002_page_0() {
+    // [Task #993] 골든 갱신 — 컷 모델이 분할 표의 큰 셀을 vpos 리셋(429.3px)에서
+    // 분할. 한컴 2022 PDF(pdf/hwpx/form-002-2022.pdf) 대조 결과 분할 콘텐츠
+    // 경계가 일치(페이지 1 끝 "…주사제형화 기술 개발", 페이지 2 시작
+    // "ㅇ PFC 나노산소운반체…"). 기존 px 모델은 분할 셀 박스를 콘텐츠보다
+    // 17.5px 길게(페이지 하단까지) 그렸으나 한컴은 콘텐츠 끝까지만 그린다.
     check_snapshot("samples/hwpx/form-002.hwpx", 0, "form-002/page-0");
 }
 
@@ -138,8 +143,8 @@ fn issue_677_bokhakwonseo_page1() {
 #[test]
 fn render_is_deterministic_within_process() {
     let repo_root = env!("CARGO_MANIFEST_DIR");
-    let bytes = fs::read(Path::new(repo_root).join("samples/hwpx/form-002.hwpx"))
-        .expect("sample present");
+    let bytes =
+        fs::read(Path::new(repo_root).join("samples/hwpx/form-002.hwpx")).expect("sample present");
 
     let doc = rhwp::wasm_api::HwpDocument::from_bytes(&bytes).expect("parse");
     let a = doc.render_page_svg_native(0).expect("render #1");

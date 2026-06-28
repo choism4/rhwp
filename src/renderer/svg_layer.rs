@@ -110,13 +110,17 @@ impl SvgLayerRenderer {
             }
             LayerNodeKind::Leaf { ops } => ops
                 .iter()
-                .map(|op| self.paint_op_to_render_node(op, node.source_node_id))
+                .filter_map(|op| self.paint_op_to_render_node(op, node.source_node_id))
                 .collect(),
         }
     }
 
-    fn paint_op_to_render_node(&mut self, op: &PaintOp, source_node_id: Option<u32>) -> RenderNode {
-        match op {
+    fn paint_op_to_render_node(
+        &mut self,
+        op: &PaintOp,
+        source_node_id: Option<u32>,
+    ) -> Option<RenderNode> {
+        let node = match op {
             PaintOp::PageBackground { bbox, background } => RenderNode::new(
                 self.take_node_id(source_node_id),
                 RenderNodeType::PageBackground(background.clone()),
@@ -152,9 +156,18 @@ impl SvgLayerRenderer {
                 RenderNodeType::Path(path.clone()),
                 *bbox,
             ),
-            PaintOp::Image { bbox, image } => RenderNode::new(
+            PaintOp::Image {
+                bbox,
+                image,
+                resolved,
+            } => RenderNode::new(
                 self.take_node_id(source_node_id),
-                RenderNodeType::Image(image.clone()),
+                RenderNodeType::Image(
+                    crate::renderer::image_resolver::image_node_with_resolved_payload(
+                        image,
+                        resolved.as_deref(),
+                    ),
+                ),
                 *bbox,
             ),
             PaintOp::Equation { bbox, equation } => RenderNode::new(
@@ -177,7 +190,14 @@ impl SvgLayerRenderer {
                 RenderNodeType::RawSvg(raw.clone()),
                 *bbox,
             ),
-        }
+            PaintOp::GlyphRun { .. }
+            | PaintOp::GlyphOutline { .. }
+            | PaintOp::CharOverlap { .. }
+            | PaintOp::TextControlMark { .. }
+            | PaintOp::TabLeader { .. }
+            | PaintOp::TextDecoration { .. } => return None,
+        };
+        Some(node)
     }
 
     fn group_kind_to_render_node_type(&self, group_kind: &GroupKind) -> RenderNodeType {

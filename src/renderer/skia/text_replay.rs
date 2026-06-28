@@ -6,10 +6,12 @@ use skia_safe::{
 
 use crate::model::style::UnderlineType;
 use crate::paint::LayerOutputOptions;
-use crate::renderer::composer::{decode_pua_overlap_number, pua_to_display_text, CharOverlapInfo};
+use crate::renderer::composer::{
+    decode_pua_overlap_number, expand_pua_render_text, pua_to_display_text, CharOverlapInfo,
+};
 use crate::renderer::layout::{compute_char_positions, split_into_clusters};
 use crate::renderer::render_tree::BoundingBox;
-use crate::renderer::TextStyle;
+use crate::renderer::{clamp_tab_leader_end_x, TextStyle};
 
 use super::renderer::colorref_to_skia;
 
@@ -282,6 +284,8 @@ impl SkiaTextReplay<'_> {
                     return;
                 }
 
+                let text = expand_pua_render_text(text);
+                let text = text.as_str();
                 let char_positions = compute_char_positions(text, style);
                 let clusters = split_into_clusters(text);
                 let text_width = *char_positions.last().unwrap_or(&0.0) as f32;
@@ -574,7 +578,9 @@ impl SkiaTextReplay<'_> {
                         continue;
                     }
                     let x1 = bbox.x as f32 + leader.start_x as f32;
-                    let x2 = bbox.x as f32 + leader.end_x as f32;
+                    let leader_end_x =
+                        clamp_tab_leader_end_x(text, &char_positions, leader, font_size as f64);
+                    let x2 = bbox.x as f32 + leader_end_x as f32;
                     let line_y = y as f32 - font_size * 0.35;
                     let color = colorref_to_skia(style.color, 1.0);
                     match leader.fill_type {

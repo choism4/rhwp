@@ -106,6 +106,7 @@ mod tests {
             separator_type: 0,
             separator_width: 0,
             separator_color: 0,
+            pagination_tolerance_px: 0.0,
         }
     }
 
@@ -122,7 +123,7 @@ mod tests {
                 zone_y_offset: 0.0,
                 wrap_around_paras: Vec::new(),
                 used_height: 0.0,
-            wrap_anchors: std::collections::HashMap::new(),
+                wrap_anchors: std::collections::HashMap::new(),
             }],
             active_header: None,
             active_footer: None,
@@ -219,8 +220,9 @@ mod tests {
             start_row: 0,
             end_row: 3,
             is_continuation: false,
-            split_start_content_offset: 0.0,
-            split_end_content_limit: 0.0,
+            start_cut: Vec::new(),
+            end_cut: Vec::new(),
+            is_block_split: false,
         }]);
         assert_eq!(a.assign(&p1), 1);
 
@@ -231,8 +233,9 @@ mod tests {
             start_row: 3,
             end_row: 6,
             is_continuation: true,
-            split_start_content_offset: 0.0,
-            split_end_content_limit: 0.0,
+            start_cut: Vec::new(),
+            end_cut: Vec::new(),
+            is_block_split: false,
         }]);
         assert_eq!(a.assign(&p2), 2);
     }
@@ -241,11 +244,17 @@ mod tests {
     fn should_hide_before_first_new_number() {
         let nns = vec![(5usize, 1u16)];
         let mut a = PageNumberAssigner::new(&nns, 1);
-        assert!(a.should_hide_page_number(), "NewNumber 존재 + 미발화 → 숨김");
+        assert!(
+            a.should_hide_page_number(),
+            "NewNumber 존재 + 미발화 → 숨김"
+        );
 
         let p1 = mk_page(vec![PageItem::FullParagraph { para_index: 0 }]);
         a.assign(&p1);
-        assert!(a.should_hide_page_number(), "아직 NewNumber 미트리거 → 숨김");
+        assert!(
+            a.should_hide_page_number(),
+            "아직 NewNumber 미트리거 → 숨김"
+        );
 
         let p2 = mk_page(vec![PageItem::FullParagraph { para_index: 5 }]);
         a.assign(&p2);

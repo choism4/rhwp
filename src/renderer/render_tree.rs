@@ -5,13 +5,13 @@
 
 use serde::Serialize;
 
-use crate::model::{ColorRef, Rect};
-use crate::model::style::ImageFillMode;
-use crate::model::image::ImageEffect;
-use crate::model::shape::TextWrap;
-use super::{TextStyle, ShapeStyle, LineStyle, PathCommand, GradientFillInfo};
 use super::composer::CharOverlapInfo;
 use super::layout::CellContext;
+use super::{GradientFillInfo, LineStyle, PathCommand, ShapeStyle, TextStyle};
+use crate::model::image::ImageEffect;
+use crate::model::shape::TextWrap;
+use crate::model::style::ImageFillMode;
+use crate::model::{ColorRef, Rect};
 
 /// 렌더 노드 고유 ID
 pub type NodeId = u32;
@@ -90,17 +90,37 @@ impl RenderNode {
             RenderNodeType::Body { .. } => ("Body", String::new()),
             RenderNodeType::Column(c) => ("Column", format!(",\"col\":{}", c)),
             RenderNodeType::FootnoteArea => ("FootnoteArea", String::new()),
-            RenderNodeType::TextLine(tl) => ("TextLine", format!(
-                ",\"pi\":{}", tl.para_index.unwrap_or(0))),
-            RenderNodeType::TextRun(tr) => ("TextRun", format!(
-                ",\"text\":{},\"pi\":{}", json_escape(&tr.text),
-                tr.section_index.map(|_| tr.para_index.unwrap_or(0)).unwrap_or(0))),
-            RenderNodeType::Table(tn) => ("Table", format!(
-                ",\"rows\":{},\"cols\":{}{}{}", tn.row_count, tn.col_count,
-                tn.para_index.map(|pi| format!(",\"pi\":{}", pi)).unwrap_or_default(),
-                tn.control_index.map(|ci| format!(",\"ci\":{}", ci)).unwrap_or_default())),
-            RenderNodeType::TableCell(tc) => ("Cell", format!(
-                ",\"row\":{},\"col\":{}", tc.row, tc.col)),
+            RenderNodeType::TextLine(tl) => (
+                "TextLine",
+                format!(",\"pi\":{}", tl.para_index.unwrap_or(0)),
+            ),
+            RenderNodeType::TextRun(tr) => (
+                "TextRun",
+                format!(
+                    ",\"text\":{},\"pi\":{}",
+                    json_escape(&tr.text),
+                    tr.section_index
+                        .map(|_| tr.para_index.unwrap_or(0))
+                        .unwrap_or(0)
+                ),
+            ),
+            RenderNodeType::Table(tn) => (
+                "Table",
+                format!(
+                    ",\"rows\":{},\"cols\":{}{}{}",
+                    tn.row_count,
+                    tn.col_count,
+                    tn.para_index
+                        .map(|pi| format!(",\"pi\":{}", pi))
+                        .unwrap_or_default(),
+                    tn.control_index
+                        .map(|ci| format!(",\"ci\":{}", ci))
+                        .unwrap_or_default()
+                ),
+            ),
+            RenderNodeType::TableCell(tc) => {
+                ("Cell", format!(",\"row\":{},\"col\":{}", tc.row, tc.col))
+            }
             RenderNodeType::Image(_) => ("Image", String::new()),
             RenderNodeType::TextBox => ("TextBox", String::new()),
             RenderNodeType::Equation(_) => ("Equation", String::new()),
@@ -114,13 +134,17 @@ impl RenderNode {
             RenderNodeType::Placeholder(_) => ("Placeholder", String::new()),
             RenderNodeType::RawSvg(_) => ("RawSvg", String::new()),
         };
-        buf.push_str(&format!("\"type\":\"{}\",\"bbox\":{{\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}}}",
-            type_str, self.bbox.x, self.bbox.y, self.bbox.width, self.bbox.height));
+        buf.push_str(&format!(
+            "\"type\":\"{}\",\"bbox\":{{\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}}}",
+            type_str, self.bbox.x, self.bbox.y, self.bbox.width, self.bbox.height
+        ));
         buf.push_str(&extra);
         if !self.children.is_empty() {
             buf.push_str(",\"children\":[");
             for (i, child) in self.children.iter().enumerate() {
-                if i > 0 { buf.push(','); }
+                if i > 0 {
+                    buf.push(',');
+                }
                 child.write_json(buf);
             }
             buf.push(']');
@@ -286,7 +310,12 @@ pub struct BoundingBox {
 
 impl BoundingBox {
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// 다른 박스와 겹치는지 확인
@@ -375,17 +404,50 @@ pub struct TextLineNode {
 impl TextLineNode {
     /// 기본 생성 (문단 식별 정보 없음)
     pub fn new(line_height: f64, baseline: f64) -> Self {
-        Self { line_height, baseline, section_index: None, para_index: None, line_index: None, vpos: None }
+        Self {
+            line_height,
+            baseline,
+            section_index: None,
+            para_index: None,
+            line_index: None,
+            vpos: None,
+        }
     }
 
     /// 문단 식별 정보 포함 생성 (커서 위치 계산용)
-    pub fn with_para(line_height: f64, baseline: f64, section_index: usize, para_index: usize) -> Self {
-        Self { line_height, baseline, section_index: Some(section_index), para_index: Some(para_index), line_index: None, vpos: None }
+    pub fn with_para(
+        line_height: f64,
+        baseline: f64,
+        section_index: usize,
+        para_index: usize,
+    ) -> Self {
+        Self {
+            line_height,
+            baseline,
+            section_index: Some(section_index),
+            para_index: Some(para_index),
+            line_index: None,
+            vpos: None,
+        }
     }
 
     /// 문단 식별 + LINE_SEG vpos 정보 포함 생성 (디버그 오버레이용)
-    pub fn with_para_vpos(line_height: f64, baseline: f64, section_index: usize, para_index: usize, line_index: u32, vpos: i32) -> Self {
-        Self { line_height, baseline, section_index: Some(section_index), para_index: Some(para_index), line_index: Some(line_index), vpos: Some(vpos) }
+    pub fn with_para_vpos(
+        line_height: f64,
+        baseline: f64,
+        section_index: usize,
+        para_index: usize,
+        line_index: u32,
+        vpos: i32,
+    ) -> Self {
+        Self {
+            line_height,
+            baseline,
+            section_index: Some(section_index),
+            para_index: Some(para_index),
+            line_index: Some(line_index),
+            vpos: Some(vpos),
+        }
     }
 }
 
@@ -495,6 +557,27 @@ impl ShapeTransform {
     pub fn has_transform(&self) -> bool {
         self.rotation != 0.0 || self.horz_flip || self.vert_flip
     }
+
+    /// 그림 노드 한정: 회전각 90°/270° (±1° 톨러런스) 일 때 bbox extent 만 swap.
+    /// 그 외 각도(0/45/180 등)는 입력 bbox 그대로 반환.
+    ///
+    /// hwpx 의 `<hp:sz>` 는 회전 후 외접 사각형 치수라서 portrait → 90° 회전 시
+    /// bbox 가 landscape 로 들어온다. 그 위에 `rotate(90, cx, cy)` transform 을 다시
+    /// 적용하면 이중회전이 되어 페이지 밖으로 튀어 나간다. 회전 전 치수로 swap 한
+    /// bbox 위에 동일 rotation transform 을 적용하면 한컴 정답지와 정합한다.
+    /// cx, cy 는 swap 전후 동일하므로 rotate 식 자체는 그대로 둔다.
+    pub fn effective_image_bbox(&self, bbox: &BoundingBox) -> BoundingBox {
+        let r = self.rotation.rem_euclid(360.0);
+        let is_perpendicular = (r - 90.0).abs() < 1.0 || (r - 270.0).abs() < 1.0;
+        if !is_perpendicular {
+            return *bbox;
+        }
+        let cx = bbox.x + bbox.width / 2.0;
+        let cy = bbox.y + bbox.height / 2.0;
+        let new_w = bbox.height;
+        let new_h = bbox.width;
+        BoundingBox::new(cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+    }
 }
 
 /// 직선 노드
@@ -520,9 +603,17 @@ pub struct LineNode {
 
 impl LineNode {
     pub fn new(x1: f64, y1: f64, x2: f64, y2: f64, style: LineStyle) -> Self {
-        Self { x1, y1, x2, y2, style,
-            section_index: None, para_index: None, control_index: None,
-            transform: ShapeTransform::default() }
+        Self {
+            x1,
+            y1,
+            x2,
+            y2,
+            style,
+            section_index: None,
+            para_index: None,
+            control_index: None,
+            transform: ShapeTransform::default(),
+        }
     }
 }
 
@@ -546,10 +637,18 @@ pub struct RectangleNode {
 }
 
 impl RectangleNode {
-    pub fn new(corner_radius: f64, style: ShapeStyle, gradient: Option<Box<GradientFillInfo>>) -> Self {
+    pub fn new(
+        corner_radius: f64,
+        style: ShapeStyle,
+        gradient: Option<Box<GradientFillInfo>>,
+    ) -> Self {
         Self {
-            corner_radius, style, gradient,
-            section_index: None, para_index: None, control_index: None,
+            corner_radius,
+            style,
+            gradient,
+            section_index: None,
+            para_index: None,
+            control_index: None,
             transform: ShapeTransform::default(),
         }
     }
@@ -574,9 +673,14 @@ pub struct EllipseNode {
 
 impl EllipseNode {
     pub fn new(style: ShapeStyle, gradient: Option<Box<GradientFillInfo>>) -> Self {
-        Self { style, gradient,
-            section_index: None, para_index: None, control_index: None,
-            transform: ShapeTransform::default() }
+        Self {
+            style,
+            gradient,
+            section_index: None,
+            para_index: None,
+            control_index: None,
+            transform: ShapeTransform::default(),
+        }
     }
 }
 
@@ -604,12 +708,22 @@ pub struct PathNode {
 }
 
 impl PathNode {
-    pub fn new(commands: Vec<PathCommand>, style: ShapeStyle, gradient: Option<Box<GradientFillInfo>>) -> Self {
-        Self { commands, style, gradient,
-            section_index: None, para_index: None, control_index: None,
+    pub fn new(
+        commands: Vec<PathCommand>,
+        style: ShapeStyle,
+        gradient: Option<Box<GradientFillInfo>>,
+    ) -> Self {
+        Self {
+            commands,
+            style,
+            gradient,
+            section_index: None,
+            para_index: None,
+            control_index: None,
             transform: ShapeTransform::default(),
             connector_endpoints: None,
-            line_style: None }
+            line_style: None,
+        }
     }
 }
 
@@ -659,14 +773,44 @@ pub struct ImageNode {
     /// (점선 사각형 + 깨진 image 아이콘) — 한컴 한글 2024 viewer 정합.
     #[serde(default)]
     pub external_path: Option<String>,
+    /// [Task #825] 머리말/꼬리말 그림 식별 marker.
+    /// `Some(ref)` 일 때 본 ImageNode 는 머리말 또는 꼬리말 안에 위치하며,
+    /// `para_index` / `control_index` 는 `Header.paragraphs[]` / `Footer.paragraphs[]`
+    /// 의 inner 인덱스를 가리킨다. `outer` 는 본문 paragraph 의 Header/Footer 컨트롤
+    /// 위치 (body_para_idx + header_ctrl_idx) 를 보존.
+    /// `None` 일 때 본문 그림 (현행 동작).
+    #[serde(default)]
+    pub header_footer_ref: Option<HeaderFooterImageRef>,
+}
+
+/// [Task #825] 머리말/꼬리말 안 그림의 outer 위치 + 종류.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HeaderFooterImageRef {
+    /// 본문 paragraph 인덱스 (Header/Footer 컨트롤 소속 paragraph)
+    pub outer_para_index: usize,
+    /// 본문 paragraph 안 Header/Footer 컨트롤 인덱스
+    pub outer_control_index: usize,
+    /// "header" or "footer"
+    pub kind: HeaderFooterKind,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderFooterKind {
+    Header,
+    Footer,
 }
 
 impl ImageNode {
     pub fn new(bin_data_id: u16, data: Option<Vec<u8>>) -> Self {
         Self {
-            bin_data_id, data,
-            section_index: None, para_index: None, control_index: None,
-            fill_mode: None, original_size: None,
+            bin_data_id,
+            data,
+            section_index: None,
+            para_index: None,
+            control_index: None,
+            fill_mode: None,
+            original_size: None,
             transform: ShapeTransform::default(),
             crop: None,
             original_size_hu: None,
@@ -675,6 +819,7 @@ impl ImageNode {
             contrast: 0,
             text_wrap: None,
             external_path: None,
+            header_footer_ref: None,
         }
     }
 }
@@ -748,16 +893,25 @@ impl PageRenderTree {
             }),
             BoundingBox::new(0.0, 0.0, width, height),
         );
-        Self { root, next_id: 1, inline_shape_positions: std::collections::HashMap::new() }
+        Self {
+            root,
+            next_id: 1,
+            inline_shape_positions: std::collections::HashMap::new(),
+        }
     }
 
     /// `CellContext` 를 InlineShapeKey 의 cell_path 부분으로 변환.
-    fn cell_path_from_ctx(cell_ctx: Option<&crate::renderer::layout::CellContext>) -> Vec<(usize, usize, usize)> {
-        cell_ctx.map(|ctx| {
-            ctx.path.iter()
-                .map(|e| (e.control_index, e.cell_index, e.cell_para_index))
-                .collect()
-        }).unwrap_or_default()
+    fn cell_path_from_ctx(
+        cell_ctx: Option<&crate::renderer::layout::CellContext>,
+    ) -> Vec<(usize, usize, usize)> {
+        cell_ctx
+            .map(|ctx| {
+                ctx.path
+                    .iter()
+                    .map(|e| (e.control_index, e.cell_index, e.cell_para_index))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 인라인 Shape 좌표 등록 (셀 컨텍스트 포함)
@@ -771,7 +925,8 @@ impl PageRenderTree {
         y: f64,
     ) {
         let cell_path = Self::cell_path_from_ctx(cell_ctx);
-        self.inline_shape_positions.insert((sec, para, ctrl, cell_path), (x, y));
+        self.inline_shape_positions
+            .insert((sec, para, ctrl, cell_path), (x, y));
     }
 
     /// 인라인 Shape 좌표 조회 (셀 컨텍스트 포함)
@@ -783,7 +938,9 @@ impl PageRenderTree {
         cell_ctx: Option<&crate::renderer::layout::CellContext>,
     ) -> Option<(f64, f64)> {
         let cell_path = Self::cell_path_from_ctx(cell_ctx);
-        self.inline_shape_positions.get(&(sec, para, ctrl, cell_path)).copied()
+        self.inline_shape_positions
+            .get(&(sec, para, ctrl, cell_path))
+            .copied()
     }
 
     /// 인라인 Shape 좌표 전체 참조 (hitTest용)
@@ -857,7 +1014,12 @@ mod tests {
     #[test]
     fn test_bounding_box_from_hwpunit() {
         use crate::model::Rect;
-        let rect = Rect { left: 0, top: 0, right: 7200, bottom: 7200 };
+        let rect = Rect {
+            left: 0,
+            top: 0,
+            right: 7200,
+            bottom: 7200,
+        };
         let bbox = BoundingBox::from_hwpunit_rect(&rect, 96.0);
         assert!((bbox.width - 96.0).abs() < 0.01);
         assert!((bbox.height - 96.0).abs() < 0.01);

@@ -500,6 +500,26 @@ export function onClick(this: any, e: MouseEvent): void {
         this.eventBus.emit('headerFooterModeChanged', 'none');
         // 본문 hitTest로 계속 진행
       } else {
+        // [Task #825] 머리말/꼬리말 편집 모드 — 그림 hit-test 우선, miss 시 텍스트 hit.
+        // 머리말 그림은 ImageNode 에 header_footer_ref 동반되어 picHit 정상 반환.
+        const picHit = this.findPictureAtClick(pageIdx, pageX, pageY);
+        if (picHit && (picHit.type === 'image' || picHit.type === 'shape' || picHit.type === 'line')) {
+          // 머리말 안 그림 객체 선택 → context menu 에 "개체 속성" 표시 가능
+          this.cursor.clearSelection();
+          this.exitPictureObjectSelectionIfNeeded();
+          this.cursor.enterPictureObjectSelectionDirect(
+            picHit.sec, picHit.ppi, picHit.ci, picHit.type as any,
+            picHit.cellIdx, picHit.cellParaIdx,
+            (picHit as any).headerFooter,
+          );
+          this.active = true;
+          this.caret.hide();
+          this.selectionRenderer.clear();
+          this.renderPictureObjectSelection();
+          this.eventBus.emit('picture-object-selection-changed', true);
+          this.textarea.focus();
+          return;
+        }
         // 머리말/꼬리말 영역 클릭 → 내부 텍스트 히트테스트로 커서 이동
         try {
           const isHeader = this.cursor.headerFooterMode === 'header';
@@ -639,7 +659,76 @@ export function onClick(this: any, e: MouseEvent): void {
       }
     }
 
-    // 글상자 내부 텍스트 직접 히트 → 바로 캐럿 진입
+    // [Task #919] 글상자 객체 선택 중 글상자 내부 클릭 → 텍스트 편집 진입.
+    // 한컴 UX: 객체 선택 후 다시 클릭 시 텍스트 편집 모드로 전환.
+    // 단, 외곽 경계선 (tolerance 5px) 클릭은 객체 선택 유지.
+    if (this.cursor.isInPictureObjectSelection() && hit.isTextBox
+        && hit.parentParaIndex !== undefined && hit.controlIndex !== undefined) {
+      const ref = this.cursor.getSelectedPictureRef();
+      if (ref && ref.type === 'shape'
+          && ref.sec === hit.sectionIndex
+          && ref.ppi === hit.parentParaIndex
+          && ref.ci === hit.controlIndex
+          && !this.isShapeBorderClickByRef(pageX, pageY, hit.sectionIndex, hit.parentParaIndex, hit.controlIndex)) {
+        // 같은 글상자 내부 클릭 → 객체 선택 해제 + 텍스트 편집 진입
+        this.cursor.exitPictureObjectSelection();
+        this.pictureObjectRenderer?.clear();
+        this.eventBus.emit('picture-object-selection-changed', false);
+        this.cursor.clearSelection();
+        this.cursor.moveTo(hit);
+        this.cursor.resetPreferredX();
+        this.cursor.setAnchor();
+        this.active = true;
+        this.startTextSelectionDrag(e);
+        this.updateCaret();
+        document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
+        this.textarea.focus();
+        return;
+      }
+    }
+
+    // [Task #919] 글상자 외곽 경계선 클릭 (tolerance 5px) → 글상자 객체 선택.
+    // hit.isTextBox && hit.parentParaIndex/controlIndex 가 있는 경우 (글상자 안 hit)
+    // 만 경계선 검사 — 한컴 UX 정합 (글상자 BBox 테두리만 객체 선택).
+    if (hit.isTextBox && hit.parentParaIndex !== undefined && hit.controlIndex !== undefined) {
+      if (this.isShapeBorderClickByRef(pageX, pageY, hit.sectionIndex, hit.parentParaIndex, hit.controlIndex)) {
+        this.cursor.clearSelection();
+        this.exitPictureObjectSelectionIfNeeded();
+        this.cursor.enterPictureObjectSelectionDirect(
+          hit.sectionIndex, hit.parentParaIndex, hit.controlIndex, 'shape',
+        );
+        this.active = true;
+        this.caret.hide();
+        this.selectionRenderer.clear();
+        this.renderPictureObjectSelection();
+        this.eventBus.emit('picture-object-selection-changed', true);
+        this.textarea.focus();
+        return;
+      }
+    }
+
+    // [Task #919] 글상자 외곽 클릭 감지 — 글상자 바깥에서 외곽 근처 클릭
+    // hit 가 본문 paragraph 이고 인접 paragraph 에 글상자 컨트롤이 있는 경우.
+    if (!hit.isTextBox) {
+      const shapeHit = this.findShapeByOuterClick(pageX, pageY, hit.sectionIndex, hit.paragraphIndex);
+      if (shapeHit) {
+        this.cursor.clearSelection();
+        this.exitPictureObjectSelectionIfNeeded();
+        this.cursor.enterPictureObjectSelectionDirect(
+          shapeHit.sec, shapeHit.ppi, shapeHit.ci, 'shape',
+        );
+        this.active = true;
+        this.caret.hide();
+        this.selectionRenderer.clear();
+        this.renderPictureObjectSelection();
+        this.eventBus.emit('picture-object-selection-changed', true);
+        this.textarea.focus();
+        return;
+      }
+    }
+
+    // 글상자 내부 텍스트/빈 영역 직접 히트 → 바로 캐럿 진입 (한컴 UX).
+    // [Task #919] hit_test_native 가 글상자 안 빈 영역에서도 isTextBox=true 반환.
     if (hit.isTextBox) {
       this.exitPictureObjectSelectionIfNeeded();
       this.cursor.clearSelection();
@@ -678,7 +767,11 @@ export function onClick(this: any, e: MouseEvent): void {
           bringShapeToFront.call(this, picHit);
           this.cursor.clearSelection();
           this.exitPictureObjectSelectionIfNeeded();
-          this.cursor.enterPictureObjectSelectionDirect(picHit.sec, picHit.ppi, picHit.ci, 'line');
+          // [Task #825] picHit.headerFooter 동반 시 머리말/꼬리말 그림 marker 보존.
+          this.cursor.enterPictureObjectSelectionDirect(
+            picHit.sec, picHit.ppi, picHit.ci, 'line',
+            undefined, undefined, (picHit as any).headerFooter,
+          );
           this.active = true;
           this.caret.hide();
           this.selectionRenderer.clear();
@@ -704,23 +797,40 @@ export function onClick(this: any, e: MouseEvent): void {
               return;
             }
           }
-          // 단일 클릭 → 객체 선택 + 맨 앞으로 이동
-          bringShapeToFront.call(this, picHit);
-          this.cursor.clearSelection();
-          this.exitPictureObjectSelectionIfNeeded();
-          this.cursor.enterPictureObjectSelectionDirect(picHit.sec, picHit.ppi, picHit.ci, 'shape');
-          this.active = true;
-          this.caret.hide();
-          this.selectionRenderer.clear();
-          this.renderPictureObjectSelection();
-          this.eventBus.emit('picture-object-selection-changed', true);
-          this.textarea.focus();
-          return;
+          // [Task #919] 한컴 UX: 글상자 (Shape with text_box) 의 외곽 경계선만
+          // 객체 선택, 내부 클릭은 즉시 텍스트 편집 진입. picHit 의 shape 분기는
+          // 이미 hit 가 본문 fall-through 후 도달 — hit.isTextBox=false 상태.
+          // 외곽 경계선 검사 → 통과 시 객체 선택, 아니면 본 분기 무시하고 일반
+          // 캐럿 배치로 fall-through.
+          // (글상자 내부 영역은 위쪽 hit.isTextBox 분기 + isShapeBorderClick 으로
+          // 이미 처리됨. 본 분기는 hit_test_native 가 textbox_hit 매칭 못한 케이스
+          // 또는 글상자 안 표/이미지 hit 등으로 textbox 처리가 안 된 케이스.)
+          if (this.isShapeBorderClickByRef(pageX, pageY, picHit.sec, picHit.ppi, picHit.ci)) {
+            bringShapeToFront.call(this, picHit);
+            this.cursor.clearSelection();
+            this.exitPictureObjectSelectionIfNeeded();
+            this.cursor.enterPictureObjectSelectionDirect(
+              picHit.sec, picHit.ppi, picHit.ci, 'shape',
+              undefined, undefined, (picHit as any).headerFooter,
+            );
+            this.active = true;
+            this.caret.hide();
+            this.selectionRenderer.clear();
+            this.renderPictureObjectSelection();
+            this.eventBus.emit('picture-object-selection-changed', true);
+            this.textarea.focus();
+            return;
+          }
+          // 글상자 내부 클릭이나 hit_test_native 가 textbox 매칭 안 한 케이스
+          // → 일반 캐럿 배치로 fall-through (글상자 가로채기 제거)
         }
         // 이미지/방정식 → 객체 선택 (z-order 미지원)
         this.cursor.clearSelection();
         this.exitPictureObjectSelectionIfNeeded();
-        this.cursor.enterPictureObjectSelectionDirect(picHit.sec, picHit.ppi, picHit.ci, picHit.type, picHit.cellIdx, picHit.cellParaIdx);
+        this.cursor.enterPictureObjectSelectionDirect(
+          picHit.sec, picHit.ppi, picHit.ci, picHit.type,
+          picHit.cellIdx, picHit.cellParaIdx, (picHit as any).headerFooter,
+        );
         this.active = true;
         this.caret.hide();
         this.selectionRenderer.clear();
@@ -845,6 +955,18 @@ export function onDblClick(this: any, e: MouseEvent): void {
     // 글상자 객체 → 텍스트 편집 진입
     if (ref && ref.type === 'shape') {
       e.preventDefault();
+      // #686: ppi=0 앵커 도형 (master page 글상자 등)은 모든 페이지에 반복 표시됨.
+      // 텍스트 진입 시 cursor가 page 0으로 잡혀 뷰가 점프하므로, page 0이 아닐 때 차단.
+      if (ref.ppi === 0) {
+        const cursorPage = this.cursor.getRect()?.pageIndex ?? -1;
+        if (cursorPage !== 0) {
+          this.cursor.exitPictureObjectSelection();
+          this.pictureObjectRenderer?.clear();
+          this.eventBus.emit('picture-object-selection-changed', false);
+          this.textarea.focus();
+          return;
+        }
+      }
       this.cursor.exitPictureObjectSelection();
       this.pictureObjectRenderer?.clear();
       this.eventBus.emit('picture-object-selection-changed', false);
@@ -1105,6 +1227,7 @@ export function onMouseMove(this: any, e: MouseEvent): void {
       // [Task #661] 포인터 좌표 기반 hit-test (드래그 영역의 자동 스크롤 영역과 동기).
       // PR #693 의 직접 hit + moveTo + updateCaretDuringDrag 영역은 PR #718 의
       // updateTextSelectionDragFromPointer 래퍼 영역에 포함됨 (dragLastClientX/Y 사용).
+      // [Issue #669] 셀 가드는 input-handler.ts 의 래퍼 내부에 적용됨.
       this.updateTextSelectionDragFromPointer();
     });
     return;

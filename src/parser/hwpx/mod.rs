@@ -11,6 +11,7 @@
 //! 5. BinData → 이미지 로딩
 
 pub mod content;
+mod contract_streams;
 pub mod header;
 pub mod master_page;
 pub mod reader;
@@ -18,9 +19,7 @@ pub mod section;
 pub mod utils;
 
 use crate::model::bin_data::{BinData, BinDataContent, BinDataType};
-use crate::model::document::{
-    Document, FileHeader, HwpVersion, Section,
-};
+use crate::model::document::{Document, FileHeader, HwpVersion, Section};
 
 /// HWPX 파싱 에러
 #[derive(Debug)]
@@ -80,22 +79,54 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     let is_hwp3_origin = hwpml_version.as_deref() == Some("1.4");
 
     // BinData 목록을 DocInfo에 등록
+    // [Task #873] isEmbeded="0" 인 외부 file 참조 (예: HWP3 → HWPX 변환본 의 절대 경로)
+    // 는 BinDataType::Link + abs_path 로 등록. 이후 populate_link_image_paths (parser/mod.rs)
+    // 가 Picture.external_path 설정 → Task #741 fallback 로 같은 dir 영역 image load.
     for (i, item) in package_info.bin_data_items.iter().enumerate() {
         let ext = item.href.rsplit('.').next().unwrap_or("dat").to_string();
+        let (data_type, abs_path) = if item.is_embedded {
+            (BinDataType::Embedding, None)
+        } else {
+            (BinDataType::Link, Some(item.href.clone()))
+        };
         doc_info.bin_data_list.push(BinData {
-            data_type: BinDataType::Embedding,
+            data_type,
             storage_id: (i + 1) as u16,
             extension: Some(ext),
+            abs_path,
             ..Default::default()
         });
     }
 
     // 4. section*.xml → Section 변환
     let mut sections = Vec::new();
-    for section_href in &package_info.section_files {
+    for (section_idx, section_href) in package_info.section_files.iter().enumerate() {
         let section_xml = reader.read_file(section_href)?;
         match section::parse_hwpx_section(&section_xml) {
-            Ok(section) => sections.push(section),
+            Ok(mut section) => {
+                if let Some(master_page_files) =
+                    package_info.section_master_page_files.get(section_idx)
+                {
+                    for master_page_href in master_page_files {
+                        match reader.read_file(master_page_href) {
+                            Ok(master_page_xml) => {
+                                match section::parse_hwpx_master_page(&master_page_xml) {
+                                    Ok(master_page) => {
+                                        section.section_def.master_pages.push(master_page);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("경고: {} 파싱 실패: {}", master_page_href, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("경고: {} 읽기 실패: {}", master_page_href, e);
+                            }
+                        }
+                    }
+                }
+                sections.push(section);
+            }
             Err(e) => {
                 eprintln!("경고: {} 파싱 실패: {}", section_href, e);
                 sections.push(Section::default());
@@ -103,46 +134,29 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         }
     }
 
-    // 4-1. 바탕쪽 연결: secPr 의 <hp:masterPage idRef> → Contents/masterpage{N}.xml 파싱.
-    //
-    // HWPX 는 바탕쪽을 본문 밖 별도 파일에 두므로(HWP5 inline LIST_HEADER 와 다름),
-    // 섹션 파서가 모은 idRef 를 manifest 항목으로 조회해 파싱한 뒤 master_pages 에 채운다.
-    // 이로써 꼬리말 쪽번호(footer AutoNumber)가 렌더 경로에 노출된다.
-    if !package_info.master_page_items.is_empty() {
-        for section in sections.iter_mut() {
-            let id_refs = std::mem::take(&mut section.section_def.master_page_id_refs);
-            for id_ref in &id_refs {
-                let Some(item) = package_info
-                    .master_page_items
-                    .iter()
-                    .find(|it| &it.id == id_ref)
-                else {
-                    eprintln!("경고: 바탕쪽 idRef '{}' 매니페스트에 없음", id_ref);
-                    continue;
-                };
-                match reader.read_file(&item.href) {
-                    Ok(mp_xml) => match master_page::parse_hwpx_master_page(&mp_xml) {
-                        Ok(mp) => section.section_def.master_pages.push(mp),
-                        Err(e) => eprintln!("경고: {} 파싱 실패: {}", item.href, e),
-                    },
-                    Err(e) => eprintln!("경고: {} 읽기 실패: {}", item.href, e),
-                }
-            }
-        }
-    }
+    // 바탕쪽(masterPage) 파일 연결은 위 4. 루프의 section_master_page_files 경로가
+    // section::parse_hwpx_master_page 로 처리한다(fork/main). 이쪽이 LAST_PAGE 의
+    // replace_base / overlap 까지 채우므로, v5 ⑦B 의 master_page_items 별도 링크는
+    // 중복(이중 push) + replace_base 미설정 회귀를 유발해 제거했다.
 
-    // [Task #554] HWP3 변환본 보정: 한글97의 마지막 줄 tolerance 모방
-    // 모든 SectionDef.page_def 의 margin_bottom 을 1600 HU 줄여 한글97 페이지네이션과 정합.
+    // [Task #554] HWP3 변환본 보정: 한글97의 마지막 줄 tolerance 모방.
+    // HWPX→HWP 저장 contract 에서는 PAGE_DEF margin_bottom 원본값을 보존해야 하므로
+    // margin 자체를 줄이지 않고 pagination 전용 tolerance 로만 전달한다.
     if is_hwp3_origin {
         for section in sections.iter_mut() {
-            section.section_def.page_def.margin_bottom =
-                section.section_def.page_def.margin_bottom.saturating_sub(1600);
+            section.section_def.page_def.pagination_bottom_tolerance =
+                section.section_def.page_def.margin_bottom.min(1600);
         }
     }
 
     // 5. BinData 이미지 로딩
     let mut bin_data_content = Vec::new();
     for (i, item) in package_info.bin_data_items.iter().enumerate() {
+        // [Task #873] isEmbeded="0" (외부 file 참조) 는 ZIP 영역 영역 부재. skip.
+        // populate_link_image_paths + populate_external_images_from_dir 가 후처리.
+        if !item.is_embedded {
+            continue;
+        }
         match reader.read_file_bytes(&item.href) {
             Ok(data) => {
                 let ext = item.href.rsplit('.').next().unwrap_or("dat").to_string();
@@ -176,7 +190,12 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
 
     // Document 조립
     let model_header = FileHeader {
-        version: HwpVersion { major: 5, minor: 1, build: 0, revision: 0 },
+        version: HwpVersion {
+            major: 5,
+            minor: 1,
+            build: 0,
+            revision: 0,
+        },
         flags: 0,
         compressed: false,
         encrypted: false,
@@ -184,15 +203,31 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         raw_data: None,
     };
 
-    let doc = Document {
+    // [Task #852 Stage 2.1] HWPX ZIP 컨테이너 → HWP OLE contract 스트림 변환.
+    // 한컴 HWP 정답지 contract (Preview/PrvText, Preview/PrvImage, Scripts/
+    // DefaultJScript) 를 HWPX 컨테이너 동등 파일 (Preview/PrvText.txt,
+    // Preview/PrvImage.png, Scripts/sourceScripts) 로부터 변환. HWPX 에
+    // 동등 데이터가 없는 contract 스트림 (HwpSummaryInformation, DocOptions/
+    // _LinkDoc, Scripts/JScriptVersion) 은 Stage 2.2 의 blank2010.hwp
+    // fallback 으로 보강. cfb_writer (`src/serializer/cfb_writer.rs:155`)
+    // 가 Document::extra_streams 를 그대로 OLE 스트림으로 작성.
+    let contract = contract_streams::extract_contract_streams(&mut reader);
+
+    let mut doc = Document {
         header: model_header,
         doc_properties,
         doc_info,
         sections,
         preview: None,
         bin_data_content,
-        extra_streams: Vec::new(),
+        extra_streams: contract.streams,
+        is_hwp3_variant: false,
     };
+
+    // [Task #873] BinData Link 타입 의 외부 file path 영역 영역 Picture.external_path 영역
+    // 전달. 이후 model::document::populate_external_images_from_dir (Task #741) 가 같은
+    // dir 영역 basename 매칭 영역 image 영역 자동 load. HWP5 parser 와 동일 처리.
+    super::populate_link_image_paths(&mut doc);
 
     Ok(doc)
 }

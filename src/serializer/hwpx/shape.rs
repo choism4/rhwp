@@ -20,8 +20,8 @@ use quick_xml::Writer;
 use crate::model::control::{AutoNumber, AutoNumberType, Control};
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{
-    CommonObjAttr, HorzAlign, HorzRelTo, LineShape, RectangleShape, TextBox, TextWrap,
-    VertAlign, VertRelTo,
+    CommonObjAttr, HorzAlign, HorzRelTo, LineShape, RectangleShape, TextBox, TextWrap, VertAlign,
+    VertRelTo,
 };
 
 use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
@@ -108,7 +108,10 @@ fn write_auto_num<W: Write>(w: &mut Writer<W>, an: &AutoNumber) -> Result<(), Se
 // =====================================================================
 
 /// `<hp:rect>` 직렬화 진입점. Rectangle IR → XML.
-pub fn write_rect<W: Write>(w: &mut Writer<W>, rect: &RectangleShape) -> Result<(), SerializeError> {
+pub fn write_rect<W: Write>(
+    w: &mut Writer<W>,
+    rect: &RectangleShape,
+) -> Result<(), SerializeError> {
     let c = &rect.common;
     // 속성 (부모 AbstractShapeObjectType + 자신):
     // id, zOrder, numberingType, textWrap, textFlow, lock, dropcapstyle,
@@ -243,21 +246,14 @@ pub fn write_container_close<W: Write>(w: &mut Writer<W>) -> Result<(), Serializ
 // =====================================================================
 
 /// `<hp:drawText>` 직렬화 — TextBox의 paragraphs를 subList로 출력.
-pub fn write_draw_text<W: Write>(
-    w: &mut Writer<W>,
-    tb: &TextBox,
-) -> Result<(), SerializeError> {
+pub fn write_draw_text<W: Write>(w: &mut Writer<W>, tb: &TextBox) -> Result<(), SerializeError> {
     let ml = tb.margin_left.to_string();
     let mr = tb.margin_right.to_string();
     let mt = tb.margin_top.to_string();
     let mb = tb.margin_bottom.to_string();
     let mw = tb.max_width.to_string();
 
-    start_tag_attrs(
-        w,
-        "hp:drawText",
-        &[("lastWidth", &mw)],
-    )?;
+    start_tag_attrs(w, "hp:drawText", &[("lastWidth", &mw)])?;
 
     empty_tag(
         w,
@@ -470,7 +466,11 @@ fn write_out_margin<W: Write>(w: &mut Writer<W>, c: &CommonObjAttr) -> Result<()
 }
 
 fn bool01(b: bool) -> &'static str {
-    if b { "1" } else { "0" }
+    if b {
+        "1"
+    } else {
+        "0"
+    }
 }
 
 fn text_wrap_str(w: TextWrap) -> &'static str {
@@ -529,8 +529,8 @@ fn horz_align_str(h: HorzAlign) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::shape::{LineShape, RectangleShape};
     use crate::model::Point;
-    use crate::model::shape::{RectangleShape, LineShape};
 
     fn serialize_rect(rect: &RectangleShape) -> String {
         let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());

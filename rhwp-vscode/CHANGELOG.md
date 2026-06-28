@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.7.13] - 2026-05-26
+
+라이브러리 버전 동기화. v0.7.12 후속 사이클 (5/18~26) — HWPX 렌더링/저장 호환성, 시험지·공공기관 문서군 회귀, 외부 기여자 PR 반영 중심의 patch 릴리즈.
+
+핵심 변경:
+
+- HWPX → HWP 저장: 표/셀 contract, gradient `BORDER_FILL`, 셀 배경 이미지 채우기 유형, 메모 컨트롤, 목차 필드 마커/페이지 표기, 페이지 번호 관련 컨트롤 보강.
+- HWPX 렌더링: 바탕쪽, 머리말/꼬리말, 문단번호, 글상자 위치·그라데이션·곡률, 문단 테두리와 시험지 지문 박스 시각 정합 개선.
+- 조판: treat-as-char 표 LINE_SEG, 중첩 표 분할, 그림 pushdown/vpos, 다단 미주, 본문 하단 overflow 측정 정정.
+- Chrome 확장: 로컬 `file://` HWP/HWPX 열기 권한 안내와 중복 다운로드 억제 (#1131/#1132).
+- CI runner 디스크 부족 완화 및 외부 PR 다수 cherry-pick 반영.
+
+## [0.7.12] - 2026-05-18
+
+라이브러리 버전 동기화. v0.7.11 후속 사이클 (5/12~18) — 외부 기여자 PR 19건 머지 + @jangster77 PR 시리즈 7건 (#956~#968). 핵심 변경:
+
+**원 Issue #952 (1 통합 → 5 분리 결함) 완결**: 쪽 테두리 paper-based outline (#956) + sample16 page 18 빈 caption phantom advance (#958) + 시험지 page 1 문9 column picture advance skip (#961) + 시험지 page 2 cases formula off-by-one (#963) + 시험지 page 2 보기 textbox inline equation duplicate 차단 (#964).
+
+**WMF SetTextAlign vertical bits 정정** (#966): `mode & VTA_TOP(=0)` 항상-true 버그 → WMF [MS-WMF] 2.1.2.18 spec 정합 (PR #918 거대 PR root cause ~60 lines 단독 포팅).
+
+**HWP3 sample18 페이지 수 +2 inflate 정정** (#968): 빈 paragraph + [쪽나누기] + overflow case 단독 page 차단.
+
+**release 빌드 LTO + codegen-units=1 + strip** (#818): rhwp CLI -28% / WASM -6.5%.
+
+**rhwp-studio 신규 기능** (5/12~18): F5/F3 블록 선택 (#811) + 메뉴 hotkey 인프라 (#810) + 쪽 새 번호로 시작 (#809) + searchAllText API + rhwpDev.goto (#814) + 문서 비교·이력 분리 PR 1/3 (#799).
+
 ## [0.7.11] - 2026-05-11
 
 라이브러리 버전 동기화. v0.7.10 후속 사이클 (5/10 + 5/11) — 외부 기여자 다수 PR 30+ 머지. 핵심 변경:

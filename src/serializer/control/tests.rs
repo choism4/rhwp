@@ -313,6 +313,9 @@ fn test_roundtrip_footnote() {
             }],
             ..Default::default()
         }],
+        // [Task #1050] CTRL_FOOTNOTE 한컴 default
+        after_decoration_letter: 0x0029,
+        ..Default::default()
     };
 
     let para = Paragraph {
@@ -403,9 +406,7 @@ fn test_roundtrip_header() {
 #[test]
 fn test_roundtrip_group_picture_child() {
     use crate::model::image::Picture;
-    use crate::model::shape::{
-        CommonObjAttr, GroupShape, ShapeComponentAttr, ShapeObject,
-    };
+    use crate::model::shape::{CommonObjAttr, GroupShape, ShapeComponentAttr, ShapeObject};
 
     let pic = Picture {
         common: CommonObjAttr::default(),
@@ -464,7 +465,10 @@ fn test_roundtrip_group_picture_child() {
         if let ShapeObject::Group(g) = shape.as_ref() {
             assert_eq!(g.children.len(), 1, "Group should have 1 child");
             if let ShapeObject::Picture(p) = &g.children[0] {
-                assert_eq!(p.image_attr.bin_data_id, 7, "bin_data_id should survive roundtrip");
+                assert_eq!(
+                    p.image_attr.bin_data_id, 7,
+                    "bin_data_id should survive roundtrip"
+                );
                 assert_eq!(p.shape_attr.original_width, 5000);
                 assert_eq!(p.shape_attr.original_height, 3000);
             } else {

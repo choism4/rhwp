@@ -1,5 +1,5 @@
 import init, { HwpDocument, version } from '@wasm/rhwp.js';
-import type { DocumentInfo, PageInfo, PageDef, SectionDef, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, NavContextEntry, FieldInfoResult, BookmarkInfo } from './types';
+import type { DocumentInfo, PageInfo, PageDef, SectionDef, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, NavContextEntry, FieldInfoResult, BookmarkInfo, LayerRenderProfile, PageLayerTree } from './types';
 
 /** HWPX 비표준 감지 경고 리포트 (#177). */
 export interface ValidationReport {
@@ -76,24 +76,58 @@ export class WasmBridge {
     };
   }
 
-  loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
+  /**
+   * 문서 IR만 해제한다. WASM 모듈 초기화 상태는 유지한다.
+   * 비교 상세 창 등 보조 WasmBridge 인스턴스에서 반복 로드 시 메모리 누수를 줄이기 위해 사용한다.
+   */
+  releaseDocument(): void {
     if (this.doc) {
-      this.doc.free();
+      try {
+        this.doc.free();
+      } catch {
+        /* noop */
+      }
+      this.doc = null;
     }
-    this._fileName = fileName ?? 'document.hwp';
     this._currentFileHandle = null;
-    this.doc = new HwpDocument(data);
-    this.doc.convertToEditable();
-    this.doc.setFileName(this._fileName);
-    const info: DocumentInfo = JSON.parse(this.doc.getDocumentInfo());
-    console.log(`[WasmBridge] 문서 로드: ${info.pageCount}페이지`);
+  }
 
-    // [Task #741 후속] 외부 file path 그림 영역 영역 dev 환경 영역 영역 fetch (basename 영역
-    // 영역 영역 same dir 영역 image 영역 영역 영역 — 본 환경 dev 영역 영역 samples/ 영역
-    // Vite asset). 영역 영역 영역 영역 영역 부재 영역 영역 placeholder 표시.
-    void this.populateExternalImagesFromDevServer();
+  loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
+    this.releaseDocument();
+    const nextFileName = fileName ?? 'document.hwp';
+    let nextDoc: HwpDocument | null = null;
 
-    return info;
+    try {
+      nextDoc = new HwpDocument(data);
+      this.doc = nextDoc;
+      this._fileName = nextFileName;
+      this.doc.convertToEditable();
+      this.ensureParagraphStableIds();
+      this.doc.setFileName(this._fileName);
+      const info: DocumentInfo = JSON.parse(this.doc.getDocumentInfo());
+      console.log(`[WasmBridge] 문서 로드: ${info.pageCount}페이지`);
+
+      // [Task #741 후속] 외부 file path 그림 영역 영역 dev 환경 영역 영역 fetch (basename 영역
+      // 영역 영역 same dir 영역 image 영역 영역 영역 — 본 환경 dev 영역 영역 samples/ 영역
+      // Vite asset). 영역 영역 영역 영역 영역 부재 영역 영역 placeholder 표시.
+      void this.populateExternalImagesFromDevServer();
+
+      return info;
+    } catch (error) {
+      if (this.doc === nextDoc) {
+        this.doc = null;
+      }
+      if (nextDoc) {
+        try {
+          nextDoc.free();
+        } catch {
+          /* noop */
+        }
+      }
+      this._fileName = 'document.hwp';
+      this._currentFileHandle = null;
+      throw error;
+    }
   }
 
   /** [Task #741 후속] 외부 file path 그림 영역 영역 dev 서버 영역 영역 fetch + inject. */
@@ -130,12 +164,18 @@ export class WasmBridge {
     }
   }
 
+  /** 메인 뷰에 문서가 올라와 있는지(비교 보조 WasmBridge 등과 구분). */
+  hasLoadedDocument(): boolean {
+    return this.doc != null;
+  }
+
   createNewDocument(): DocumentInfo {
     if (!this.doc) {
       // 아직 WASM 객체가 없으면 더미로 생성 (createEmpty → 즉시 교체)
       this.doc = HwpDocument.createEmpty();
     }
     const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
+    this.ensureParagraphStableIds();
     this._fileName = '새 문서.hwp';
     this._currentFileHandle = null;
     this.doc.setFileName(this._fileName);
@@ -205,9 +245,27 @@ export class WasmBridge {
     return this.doc?.pageCount() ?? 0;
   }
 
+  getSectionCount(): number {
+    return this.doc?.getSectionCount() ?? 0;
+  }
+
   getPageInfo(pageNum: number): PageInfo {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getPageInfo(pageNum));
+  }
+
+  refreshLayout(): void {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    try {
+      (this.doc as any).refreshLayout?.();
+    } catch (e) {
+      console.warn('[WasmBridge] refreshLayout failed:', e);
+    }
+  }
+
+  getDocumentInfo(): DocumentInfo {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getDocumentInfo());
   }
 
   getPageDef(sectionIdx: number): PageDef {
@@ -253,7 +311,15 @@ export class WasmBridge {
     layerKind: 'all' | 'flow' | 'behind' | 'front',
   ): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    this.doc.renderPageToCanvasFiltered(pageNum, canvas, scale, layerKind);
+    const d = this.doc as unknown as {
+      renderPageToCanvasFiltered?: (p: number, c: HTMLCanvasElement, s: number, k: string) => void;
+    };
+    if (typeof d.renderPageToCanvasFiltered === 'function') {
+      d.renderPageToCanvasFiltered(pageNum, canvas, scale, layerKind);
+      return;
+    }
+    // 구버전 WASM(public/rhwp.js 등): 레이어 필터 API 없음 → 전체 캔버스 렌더로 폴백
+    this.doc.renderPageToCanvas(pageNum, canvas, scale);
   }
 
   /**
@@ -263,7 +329,95 @@ export class WasmBridge {
    */
   getPageLayerTree(pageNum: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return this.doc.getPageLayerTree(pageNum);
+    const d = this.doc as unknown as { getPageLayerTree?: (p: number) => string };
+    if (typeof d.getPageLayerTree === 'function') {
+      return d.getPageLayerTree(pageNum);
+    }
+    return '{"pageWidth":0,"pageHeight":0,"profile":"screen","root":{"kind":"leaf","bounds":{"x":0,"y":0,"width":0,"height":0},"ops":[]}}';
+  }
+
+  getPageLayerTreeObject(pageNum: number, profile: LayerRenderProfile = 'screen'): PageLayerTree {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as {
+      getPageLayerTreeWithProfile?: (p: number, profile: string) => string;
+      getPageLayerTree?: (p: number) => string;
+    };
+    const json = typeof d.getPageLayerTreeWithProfile === 'function'
+      ? d.getPageLayerTreeWithProfile(pageNum, profile)
+      : this.getPageLayerTree(pageNum);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (error) {
+      throw new Error(`[WasmBridge] PageLayerTree JSON parse 실패 (page=${pageNum}): ${error}`);
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error(`[WasmBridge] PageLayerTree JSON shape 오류 (page=${pageNum}): object가 아닙니다`);
+    }
+    const tree = parsed as Partial<PageLayerTree> & { layers?: unknown };
+    if (!tree.root || typeof tree.root !== 'object' || !('kind' in tree.root)) {
+      if (Array.isArray(tree.layers)) {
+        const pageInfo = this.getPageInfo(pageNum);
+        return {
+          pageWidth: pageInfo.width,
+          pageHeight: pageInfo.height,
+          profile,
+          root: {
+            kind: 'leaf',
+            bounds: { x: 0, y: 0, width: pageInfo.width, height: pageInfo.height },
+            ops: [],
+          },
+        };
+      }
+      throw new Error(`[WasmBridge] PageLayerTree JSON shape 오류 (page=${pageNum}): root.kind가 없습니다`);
+    }
+    const rootKind = (tree.root as { kind?: unknown }).kind;
+    if (rootKind !== 'group' && rootKind !== 'clipRect' && rootKind !== 'leaf') {
+      throw new Error(`[WasmBridge] PageLayerTree JSON shape 오류 (page=${pageNum}): 알 수 없는 root.kind=${String(rootKind)}`);
+    }
+    if (!tree.profile) {
+      tree.profile = profile;
+    }
+    return tree as PageLayerTree;
+  }
+
+  clearLayerResourceCache(): void {
+    /* Reserved for JS-value resource transport builds. JSON export is self-contained. */
+  }
+
+  getCanvasKitReplayPlan(pageNum: number, mode: 'default' | 'compat' = 'default'): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as {
+      getCanvasKitReplayPlan?: (p: number, mode: string) => string;
+    };
+    if (typeof d.getCanvasKitReplayPlan === 'function') {
+      return d.getCanvasKitReplayPlan(pageNum, mode);
+    }
+    return JSON.stringify({
+      mode,
+      hiddenCanvas2dOverlayAllowed: false,
+      directReplayRequired: true,
+      summary: {
+        totalItems: 0,
+        directItems: 0,
+        directRequiredItems: 0,
+        compatOverlayItems: 0,
+        textFallbackItems: 0,
+        unsupportedItems: 0,
+        hiddenOverlayViolations: 0,
+      },
+      items: [],
+      textVariants: [],
+    });
+  }
+
+  getPageOverlayImages(pageNum: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as { getPageOverlayImages?: (p: number) => string };
+    if (typeof d.getPageOverlayImages === 'function') {
+      return d.getPageOverlayImages(pageNum);
+    }
+    return '';
   }
 
   renderPageSvg(pageNum: number): string {
@@ -318,6 +472,11 @@ export class WasmBridge {
     return JSON.parse((this.doc as any).getColumnDef(sec));
   }
 
+  insertNewNumber(sec: number, para: number, charOffset: number, startNum: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).insertNewNumber(sec, para, charOffset, startNum);
+  }
+
   setColumnDef(sec: number, columnCount: number, columnType: number, sameWidth: number, spacingHu: number): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return (this.doc as any).setColumnDef(sec, columnCount, columnType, sameWidth, spacingHu);
@@ -351,6 +510,34 @@ export class WasmBridge {
   getParagraphCount(sec: number): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.getParagraphCount(sec);
+  }
+
+  getParagraphStableId(sec: number, para: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as { getParagraphStableId?: (a: number, b: number) => string };
+    if (typeof d.getParagraphStableId !== 'function') return '';
+    return d.getParagraphStableId(sec, para) ?? '';
+  }
+
+  /** 비교/스냅샷 생성 직전에만 stable_id를 보정한다(문서 로드 시 자동 호출 금지). */
+  ensureParagraphStableIds(): void {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as { ensureParagraphStableIds?: () => void };
+    if (typeof d.ensureParagraphStableIds === 'function') {
+      try {
+        d.ensureParagraphStableIds();
+      } catch (e) {
+        console.warn('[WasmBridge] ensureParagraphStableIds skipped:', e);
+      }
+    }
+  }
+
+  /** 디버그: `JSON.parse(bridge.debugDumpStableIds(0,0,12))` 등 분할 직후 등 stable_id 확인 */
+  debugDumpStableIds(sec: number, startPara: number, count: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as { debugDumpStableIds?: (a: number, b: number, c: number) => string };
+    if (typeof d.debugDumpStableIds !== 'function') return '[]';
+    return d.debugDumpStableIds(sec, startPara, count) ?? '[]';
   }
 
   /** 문단에 텍스트박스 Shape 컨트롤이 있으면 control_index, 없으면 -1 */
@@ -509,6 +696,12 @@ export class WasmBridge {
     return JSON.parse(this.doc.getTableBBox(sec, parentPara, controlIdx));
   }
 
+  /** [Task #919] 글상자/도형 컨트롤의 페이지 좌표 바운딩박스 */
+  getShapeBBox(sec: number, parentPara: number, controlIdx: number): { pageIndex: number; x: number; y: number; width: number; height: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(this.doc.getShapeBBox(sec, parentPara, controlIdx));
+  }
+
   deleteTableControl(sec: number, parentPara: number, controlIdx: number): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.deleteTableControl(sec, parentPara, controlIdx));
@@ -540,6 +733,15 @@ export class WasmBridge {
   getTableProperties(sec: number, parentPara: number, controlIdx: number): TableProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getTableProperties(sec, parentPara, controlIdx));
+  }
+
+  getTableSignature(sec: number, parentPara: number, controlIdx: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const d = this.doc as unknown as { getTableSignature?: (a: number, b: number, c: number) => string };
+    if (typeof d.getTableSignature !== 'function') {
+      throw new Error('getTableSignature API unavailable');
+    }
+    return d.getTableSignature(sec, parentPara, controlIdx);
   }
 
   setTableProperties(sec: number, parentPara: number, controlIdx: number, props: Partial<TableProperties>): { ok: boolean } {
@@ -628,6 +830,37 @@ export class WasmBridge {
     return JSON.parse(this.doc.getPictureProperties(sec, para, ci));
   }
 
+  /** [Task #825] 머리말/꼬리말 안 그림 속성 조회. */
+  getHeaderFooterPictureProperties(
+    sec: number,
+    outerPara: number,
+    outerCtrl: number,
+    innerPara: number,
+    innerCtrl: number,
+  ): import('./types').PictureProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(
+      (this.doc as any).getHeaderFooterPictureProperties(sec, outerPara, outerCtrl, innerPara, innerCtrl)
+    );
+  }
+
+  /** [Task #825] 머리말/꼬리말 안 그림 속성 변경. */
+  setHeaderFooterPictureProperties(
+    sec: number,
+    outerPara: number,
+    outerCtrl: number,
+    innerPara: number,
+    innerCtrl: number,
+    props: Record<string, unknown>,
+  ): { ok: boolean } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse(
+      (this.doc as any).setHeaderFooterPictureProperties(
+        sec, outerPara, outerCtrl, innerPara, innerCtrl, JSON.stringify(props),
+      )
+    );
+  }
+
   setPictureProperties(sec: number, para: number, ci: number, props: Record<string, unknown>): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.setPictureProperties(sec, para, ci, JSON.stringify(props)));
@@ -662,6 +895,11 @@ export class WasmBridge {
   getShapeProperties(sec: number, para: number, ci: number): import('./types').ShapeProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getShapeProperties(sec, para, ci));
+  }
+
+  getShapeText(sec: number, para: number, ci: number): { ok: boolean; text: string } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).getShapeText(sec, para, ci));
   }
 
   setShapeProperties(sec: number, para: number, ci: number, props: Record<string, unknown>): { ok: boolean } {
@@ -1378,6 +1616,11 @@ export class WasmBridge {
   searchText(query: string, fromSec: number, fromPara: number, fromChar: number, forward: boolean, caseSensitive: boolean): import('./types').SearchResult {
     if (!this.doc || typeof (this.doc as any).searchText !== 'function') return { found: false };
     return JSON.parse((this.doc as any).searchText(query, fromSec, fromPara, fromChar, forward, caseSensitive));
+  }
+
+  searchAllText(query: string, caseSensitive: boolean, includeCells: boolean = false): import('./types').SearchHit[] {
+    if (!this.doc || typeof (this.doc as any).searchAllText !== 'function') return [];
+    return JSON.parse((this.doc as any).searchAllText(query, caseSensitive, includeCells));
   }
 
   replaceText(sec: number, para: number, charOffset: number, length: number, newText: string): import('./types').ReplaceResult {

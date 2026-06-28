@@ -1,11 +1,11 @@
 //! HWP3 그리기 객체 파싱
-//! 
+//!
 //! HWP3 파일에 포함된 그리기 객체(선, 사각형, 타원, 그룹 등)를 파싱하여 렌더링 가능한 모델로 변환한다.
 //! 그리기 객체의 계층 구조(트리)와 캡션, 속성 정보 등을 추출하는 역할을 한다.
 
+use crate::parser::hwp3::encoding::decode_hwp3_string;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{self, Read, Seek, SeekFrom};
-use crate::parser::hwp3::encoding::decode_hwp3_string;
 
 #[derive(Debug, Default)]
 pub struct Hwp3DrawingObjectFrameHeader {
@@ -40,8 +40,8 @@ impl Hwp3DrawingObjectFrameHeader {
 pub struct Hwp3DrawingObjectHypertextInfo {
     pub length: u32,
     pub jump_file_name: String, // 256 kchar
-    pub jump_bookmark: String, // 16 hchar (보통 32 바이트지만 문서에 따라 16 바이트로 처리)
-    pub macro_data: Vec<u8>, // 325 바이트
+    pub jump_bookmark: String,  // 16 hchar (보통 32 바이트지만 문서에 따라 16 바이트로 처리)
+    pub macro_data: Vec<u8>,    // 325 바이트
     pub kind: u8,
     pub reserved: [u8; 3],
 }
@@ -107,15 +107,15 @@ impl Hwp3DrawingObjectBasicAttr {
             options: reader.read_u32::<LittleEndian>()?,
         })
     }
-    
+
     pub fn has_gradient(&self) -> bool {
         (self.options & (1 << 16)) != 0
     }
-    
+
     pub fn has_rotation(&self) -> bool {
         (self.options & (1 << 17)) != 0
     }
-    
+
     pub fn has_bitmap_pattern(&self) -> bool {
         (self.options & (1 << 18)) != 0
     }
@@ -240,21 +240,21 @@ impl Hwp3DrawingObjectCommonHeader {
             reader.read_i32::<LittleEndian>()?,
             reader.read_i32::<LittleEndian>()?,
         ];
-        
+
         let basic_attr = Hwp3DrawingObjectBasicAttr::read(&mut reader)?;
-        
+
         let rotation_attr = if basic_attr.has_rotation() {
             Some(Hwp3DrawingObjectRotationAttr::read(&mut reader)?)
         } else {
             None
         };
-        
+
         let gradient_attr = if basic_attr.has_gradient() {
             Some(Hwp3DrawingObjectGradientAttr::read(&mut reader)?)
         } else {
             None
         };
-        
+
         let bitmap_pattern_attr = if basic_attr.has_bitmap_pattern() {
             Some(Hwp3DrawingObjectBitmapPatternAttr::read(&mut reader)?)
         } else {
@@ -342,6 +342,7 @@ impl Hwp3DrawingPolygon {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
+        super::check_record_count(point_count as usize)?;
         let mut points = Vec::with_capacity(point_count as usize);
         for _ in 0..point_count {
             points.push([
@@ -369,7 +370,7 @@ impl Hwp3DrawingTextBox {
     pub fn read<R: Read>(mut reader: R) -> Result<Self, io::Error> {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
-        let mut paragraph_list_data = vec![0u8; info2_len as usize];
+        let mut paragraph_list_data = super::alloc_record_buf(info2_len as usize)?;
         if info2_len > 0 {
             reader.read_exact(&mut paragraph_list_data)?;
         }
@@ -394,6 +395,7 @@ impl Hwp3DrawingCurve {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
+        super::check_record_count(point_count as usize)?;
         let mut points = Vec::with_capacity(point_count as usize);
         for _ in 0..point_count {
             points.push([
@@ -446,6 +448,7 @@ impl Hwp3DrawingExtendedPolygon {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
+        super::check_record_count(point_count as usize)?;
         let mut points = Vec::with_capacity(point_count as usize);
         for _ in 0..point_count {
             points.push([
@@ -453,7 +456,7 @@ impl Hwp3DrawingExtendedPolygon {
                 reader.read_i32::<LittleEndian>()?,
             ]);
         }
-        let mut line_attrs = vec![0u8; point_count as usize];
+        let mut line_attrs = super::alloc_record_buf(point_count as usize)?;
         if point_count > 0 {
             reader.read_exact(&mut line_attrs)?;
         }
@@ -470,11 +473,11 @@ impl Hwp3DrawingExtendedPolygon {
 impl Hwp3DrawingObject {
     pub fn read<R: Read + Seek>(mut reader: R) -> Result<Self, io::Error> {
         let header = Hwp3DrawingObjectCommonHeader::read(&mut reader)?;
-        
+
         // 글상자(6)인 경우, 공통 헤더 바로 뒤에 글상자 정보가 위치함.
         // 테이블 78 "글상자 세부 정보"에 따라 info1_len, info2_len, 문단 리스트가 존재함.
         // 이는 아래에서 처리됨.
-        
+
         match header.object_type {
             0 => {
                 // 컨테이너: 추가 세부 길이 정보 없음
@@ -540,12 +543,12 @@ impl Hwp3DrawingObject {
             _ => {
                 // 알 수 없는 객체
                 let info1_len = reader.read_u32::<LittleEndian>()?;
-                let mut info1 = vec![0u8; info1_len as usize];
+                let mut info1 = super::alloc_record_buf(info1_len as usize)?;
                 reader.read_exact(&mut info1)?;
                 let info2_len = reader.read_u32::<LittleEndian>()?;
-                let mut info2 = vec![0u8; info2_len as usize];
+                let mut info2 = super::alloc_record_buf(info2_len as usize)?;
                 reader.read_exact(&mut info2)?;
-                
+
                 let mut all_data = Vec::new();
                 all_data.extend(info1);
                 all_data.extend(info2);
@@ -555,11 +558,14 @@ impl Hwp3DrawingObject {
     }
 }
 
-use crate::model::shape::{ShapeObject, GroupShape, LineShape, RectangleShape, EllipseShape, ArcShape, PolygonShape, CurveShape, CommonObjAttr, DrawingObjAttr, ShapeComponentAttr, TextBox};
+use crate::model::shape::{
+    ArcShape, CommonObjAttr, CurveShape, DrawingObjAttr, EllipseShape, GroupShape, LineShape,
+    PolygonShape, RectangleShape, ShapeComponentAttr, ShapeObject, TextBox,
+};
+use crate::model::style::{Fill, FillType, ShapeBorderLine};
 use crate::model::Padding;
-use crate::model::style::{Fill, ShapeBorderLine, FillType};
-use std::collections::HashMap;
 use crate::parser::hwp3::Hwp3Error;
+use std::collections::HashMap;
 
 const HWP3_UNIT_SCALE: i32 = 4;
 
@@ -585,7 +591,14 @@ pub fn parse_drawing_object_tree(
         });
     }
 
-    let mut root_nodes = parse_shape_list(cursor, doc_char_shapes, doc_para_shapes, doc_border_fills, doc_tab_defs, pic_name_to_id)?;
+    let mut root_nodes = parse_shape_list(
+        cursor,
+        doc_char_shapes,
+        doc_para_shapes,
+        doc_border_fills,
+        doc_tab_defs,
+        pic_name_to_id,
+    )?;
 
     if root_nodes.is_empty() {
         return Err(Hwp3Error::ParseError {
@@ -612,25 +625,39 @@ fn parse_shape_list(
 ) -> Result<Vec<ShapeObject>, Hwp3Error> {
     let mut list = Vec::new();
     loop {
-        let raw_obj = Hwp3DrawingObject::read(&mut *cursor)
-            .map_err(|e| Hwp3Error::IoError { source: e })?;
+        let raw_obj =
+            Hwp3DrawingObject::read(&mut *cursor).map_err(|e| Hwp3Error::IoError { source: e })?;
 
-        let (mut node, connection_info) = map_to_shape_object(raw_obj, doc_char_shapes, doc_para_shapes, doc_border_fills, doc_tab_defs, pic_name_to_id)?;
+        let (mut node, connection_info) = map_to_shape_object(
+            raw_obj,
+            doc_char_shapes,
+            doc_para_shapes,
+            doc_border_fills,
+            doc_tab_defs,
+            pic_name_to_id,
+        )?;
 
         let has_sibling = (connection_info & 0x01) != 0;
         let has_child = (connection_info & 0x02) != 0;
 
         if has_child {
-            let children = parse_shape_list(cursor, doc_char_shapes, doc_para_shapes, doc_border_fills, doc_tab_defs, pic_name_to_id)?;
+            let children = parse_shape_list(
+                cursor,
+                doc_char_shapes,
+                doc_para_shapes,
+                doc_border_fills,
+                doc_tab_defs,
+                pic_name_to_id,
+            )?;
             if let ShapeObject::Group(ref mut g) = node {
                 g.children = children;
             } else {
                 eprintln!("HWP3 그리기 객체에서 컨테이너가 아닌 도형이 자식을 가짐");
             }
         }
-        
+
         list.push(node);
-        
+
         if !has_sibling {
             break;
         }
@@ -649,21 +676,13 @@ fn map_to_shape_object(
     let mut parsed_paragraphs = Vec::new();
 
     let (header, shape) = match raw {
-        Hwp3DrawingObject::Container(hdr) => {
-            (hdr, ShapeObject::Group(GroupShape::default()))
-        }
-        Hwp3DrawingObject::Line(hdr, _details) => {
-            (hdr, ShapeObject::Line(LineShape::default()))
-        }
+        Hwp3DrawingObject::Container(hdr) => (hdr, ShapeObject::Group(GroupShape::default())),
+        Hwp3DrawingObject::Line(hdr, _details) => (hdr, ShapeObject::Line(LineShape::default())),
         Hwp3DrawingObject::Rectangle(hdr) => {
             (hdr, ShapeObject::Rectangle(RectangleShape::default()))
         }
-        Hwp3DrawingObject::Ellipse(hdr) => {
-            (hdr, ShapeObject::Ellipse(EllipseShape::default()))
-        }
-        Hwp3DrawingObject::Arc(hdr, _details) => {
-            (hdr, ShapeObject::Arc(ArcShape::default()))
-        }
+        Hwp3DrawingObject::Ellipse(hdr) => (hdr, ShapeObject::Ellipse(EllipseShape::default())),
+        Hwp3DrawingObject::Arc(hdr, _details) => (hdr, ShapeObject::Arc(ArcShape::default())),
         Hwp3DrawingObject::Polygon(hdr, _details) => {
             (hdr, ShapeObject::Polygon(PolygonShape::default()))
         }
@@ -677,31 +696,25 @@ fn map_to_shape_object(
                     doc_border_fills,
                     doc_tab_defs,
                     pic_name_to_id,
-                    0,          // body_left_hu: 드로잉 내부 텍스트, wrap zone 불필요
+                    0,            // body_left_hu: 드로잉 내부 텍스트, wrap zone 불필요
                     i32::MAX / 2, // column_width_hu
                 )?;
                 parsed_paragraphs = paras;
             }
             (hdr, ShapeObject::Rectangle(RectangleShape::default()))
         }
-        Hwp3DrawingObject::Curve(hdr, _details) => {
-            (hdr, ShapeObject::Curve(CurveShape::default()))
-        }
+        Hwp3DrawingObject::Curve(hdr, _details) => (hdr, ShapeObject::Curve(CurveShape::default())),
         Hwp3DrawingObject::ModifiedEllipse(hdr, _details) => {
             (hdr, ShapeObject::Ellipse(EllipseShape::default()))
         }
-        Hwp3DrawingObject::ModifiedArc(hdr) => {
-            (hdr, ShapeObject::Arc(ArcShape::default()))
-        }
+        Hwp3DrawingObject::ModifiedArc(hdr) => (hdr, ShapeObject::Arc(ArcShape::default())),
         Hwp3DrawingObject::ExtendedCurve(hdr, _details) => {
             (hdr, ShapeObject::Curve(CurveShape::default()))
         }
         Hwp3DrawingObject::ClosedPolygon(hdr, _details) => {
             (hdr, ShapeObject::Polygon(PolygonShape::default()))
         }
-        Hwp3DrawingObject::Unknown(hdr, _data) => {
-            (hdr, ShapeObject::Group(GroupShape::default()))
-        }
+        Hwp3DrawingObject::Unknown(hdr, _data) => (hdr, ShapeObject::Group(GroupShape::default())),
     };
 
     let connection_info = header.connection_info;
@@ -719,7 +732,7 @@ fn map_to_shape_object(
         let y0 = rot.parallelogram[1] as f64;
         let x1 = rot.parallelogram[2] as f64;
         let y1 = rot.parallelogram[3] as f64;
-        
+
         let dx = x1 - x0;
         let dy = y1 - y0;
         if dx != 0.0 || dy != 0.0 {
@@ -745,23 +758,87 @@ fn map_to_shape_object(
     let border_line = ShapeBorderLine {
         color: header.basic_attr.line_color,
         width: header.basic_attr.line_width as i32 * HWP3_UNIT_SCALE,
-        attr: header.basic_attr.line_style as u32,
+        // [Task #877 Stage 3] HWP3 drawing line_style = 0 (= "선 종류 없음") 인데
+        // line_width > 0 인 경우 → 실제 한컴 viewer 는 실선으로 표시. (sample16 RFP
+        // 박스 외곽선 회귀: raw line_style=0, line_width=84, line_color=0 검정)
+        // 렌더러 [renderer/layout/utils.rs:163] 의 `attr & 0x3F == 0` 시 외곽선 미표시
+        // 규칙에 맞추기 위해 bit 0..5 = 1 (Solid LineType) 보강.
+        //
+        // [Task #1008 격차 B] HWP3 raw line_style 의 LineType=2~7 (점선/일점쇄선
+        // 등) 도 한컴 viewer 는 실선으로 렌더 (sample16 pi=71 사업개요 박스 raw
+        // line_style=2 → 한컴 정답 = 실선). HWP3 native LineType 변형은 spec
+        // 상 존재하나 한컴 동작은 일관 solid — 작업지시자 한컴 한글 정답지 시각
+        // 정답 단언. HWP3 sample 분포 sweep: line_style=2 는 sample16 한정 (다른
+        // fixture: 0/1 만), narrow fix 회귀 risk 0. HWP3 한정 (HWP5/HWPX 무영향).
+        attr: {
+            let raw_attr = header.basic_attr.line_style as u32;
+            let line_type = raw_attr & 0x3F;
+            if line_type == 0 && header.basic_attr.line_width > 0 {
+                raw_attr | 0x01
+            } else if (2..=7).contains(&line_type) {
+                // HWP3 의 LineType 2~7 을 1 (Solid) 로 normalize
+                (raw_attr & !0x3F) | 0x01
+            } else {
+                raw_attr
+            }
+        },
         outline_style: 0,
     };
 
+    // [Task #877 Stage 4] HWP3 fill_color 의 high byte (bit 24~31) 가 0 이 아니면
+    // 한컴 HWP3 의 "기본값 없음/투명" flag 로 추정 (sample16 paragraph 5/131/393:
+    // raw 0x10000000 = bit 28 set + RGB 0). rhwp 가 raw 그대로 ColorRef 로 사용
+    // → 거의 검정 fill (alpha=0x10) → 외곽선이 fill 위에 안 보이는 회귀.
+    //
+    // 해결: RGB=0 + high flag set 인 경우 흰색 fill 로 대체. 한컴 viewer 의 실제
+    // 표시 (연한 보라 채우기) 와 100% 정합은 아니나 외곽선 가시화로 본질 표현.
+    let raw_fc = header.basic_attr.fill_color;
+    let fill_flag = (raw_fc >> 24) & 0xFF;
+    let fill_rgb = raw_fc & 0x00FFFFFF;
+    let effective_rgb = if fill_flag != 0 && fill_rgb == 0 {
+        0x00FFFFFF
+    } else {
+        fill_rgb
+    };
+    // [Task #1008 격차 A] HWP3 gradient_attr 이 파싱된 경우 IR Fill.gradient 에 매핑.
+    // HWP3 raw stream 의 Hwp3DrawingObjectGradientAttr (drawing.rs:149~170) 은 이미
+    // basic_attr.has_gradient() 시 파싱되어 header.gradient_attr 에 보존되지만, 종전
+    // 코드는 fill_type 을 항상 Solid 로 하드코딩하여 데이터가 무시되었음. HWP5 의
+    // doc_info.rs:404 매핑과 동일 contract 로 IR 주입 (step→blur, 2-stop colors,
+    // positions=vec![] → renderer 가 균등 분포).
+    let (fill_type, gradient) = if let Some(g) = header.gradient_attr.as_ref() {
+        let grad = crate::model::style::GradientFill {
+            gradient_type: g.kind as i16,
+            angle: g.angle as i16,
+            center_x: g.center_x as i16,
+            center_y: g.center_y as i16,
+            blur: g.step as i16,
+            step_center: 0,
+            colors: vec![g.start_color, g.end_color],
+            positions: vec![],
+        };
+        (crate::model::style::FillType::Gradient, Some(grad))
+    } else {
+        (crate::model::style::FillType::Solid, None)
+    };
     let fill = Fill {
-        fill_type: crate::model::style::FillType::Solid,
+        fill_type,
         solid: Some(crate::model::style::SolidFill {
-            background_color: header.basic_attr.fill_color,
+            background_color: effective_rgb,
             pattern_color: header.basic_attr.pattern_color,
             pattern_type: header.basic_attr.pattern_type as i32,
         }),
-        gradient: None,
+        gradient,
         image: None,
-        alpha: 255,
+        // [Task #877 Stage 4] 한컴 호환 alpha convention: 0=불투명, 255=완전 투명.
+        // (renderer/layout/utils.rs:199 의 opacity 식: opacity = 1 - alpha/255)
+        // 기존 alpha=255 → opacity=0 → SVG <rect opacity="0.000"> 완전 투명 회귀.
+        // HWP3 raw 에는 alpha 정보 없음, 한컴 viewer 의 default = 불투명 = alpha 0.
+        alpha: 0,
     };
-    
-    let text_box = if (header.basic_attr.options & (1 << 19)) != 0 || !parsed_paragraphs.is_empty() {
+
+    let text_box = if (header.basic_attr.options & (1 << 19)) != 0 || !parsed_paragraphs.is_empty()
+    {
         Some(TextBox {
             margin_left: (header.basic_attr.textbox_margin[0] as i32 * HWP3_UNIT_SCALE) as i16,
             margin_top: (header.basic_attr.textbox_margin[1] as i32 * HWP3_UNIT_SCALE) as i16,
@@ -783,13 +860,34 @@ fn map_to_shape_object(
     };
 
     match final_shape {
-        ShapeObject::Line(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Rectangle(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Ellipse(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Arc(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Polygon(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Curve(ref mut s) => { s.common = common; s.drawing = drawing_attr; },
-        ShapeObject::Group(ref mut s) => { s.common = common; s.shape_attr = drawing_attr.shape_attr; },
+        ShapeObject::Line(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Rectangle(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Ellipse(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Arc(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Polygon(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Curve(ref mut s) => {
+            s.common = common;
+            s.drawing = drawing_attr;
+        }
+        ShapeObject::Group(ref mut s) => {
+            s.common = common;
+            s.shape_attr = drawing_attr.shape_attr;
+        }
         _ => {}
     }
 

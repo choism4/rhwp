@@ -38,9 +38,9 @@
 | 항목 | 내용 |
 |------|------|
 | 스펙 위치 | 표 67 (문단 리스트 헤더) |
-| 스펙 기술 | UINT32 속성 필드에서 bit 0~2=텍스트 방향, bit 3~4=줄바꿈, bit 5~6=세로 정렬 |
-| 실제 구현 | 비트 위치가 **상위 16비트**에 존재: bit 16~18=텍스트 방향, bit 19~20=줄바꿈, bit 21~22=세로 정렬 |
-| 검증 방법 | `list_attr=0x00200000` (bit 21 설정) → 세로정렬=Center(1). 스펙대로 bit 5~6을 읽으면 항상 0(Top)이 됨 |
+| 스펙 기술 | UINT32 속성 필드에서 bit 0\~2=텍스트 방향, bit 3\~4=줄바꿈, bit 5\~6=세로 정렬 |
+| 실제 구현 | 비트 위치가 **상위 16비트**에 존재: bit 16\~18=텍스트 방향, bit 19\~20=줄바꿈, bit 21\~22=세로 정렬 |
+| 검증 방법 | `list_attr=0x00200000` (bit 21 설정) → 세로정렬=Center(1). 스펙대로 bit 5\~6을 읽으면 항상 0(Top)이 됨 |
 | 추출 공식 | `text_direction = (list_attr >> 16) & 0x07`, `vertical_align = (list_attr >> 21) & 0x03` |
 | 수정 파일 | `src/parser/control.rs` |
 | 발견일 | 2026-02-06 |
@@ -180,8 +180,8 @@
 |------|------|
 | 스펙 위치 | 표 149 (쪽 번호 위치) → "속성(표 148 참조)" |
 | 스펙 오류 | 표 148은 "홀/짝수 조정"(bit 0~1만 정의). **올바른 참조는 표 150** |
-| 표 150 내용 | bit 0~7: 번호 모양(format), bit 8~11: 표시 위치(position) |
-| 실제 영향 | 표 148을 참조하면 bit 0~3만 사용 → position을 bit 4~7로 오해 → position=0(없음)으로 잘못 판독 |
+| 표 150 내용 | bit 0\~7: 번호 모양(format), bit 8\~11: 표시 위치(position) |
+| 실제 영향 | 표 148을 참조하면 bit 0\~3만 사용 → position을 bit 4\~7로 오해 → position=0(없음)으로 잘못 판독 |
 | 검증 데이터 | attr=0x00000500: 올바른 format=(0x500&0xFF)=0, position=(0x500>>8)&0x0F=**5**(가운데 아래) |
 | 섹션 제목 불일치 | "글자 겹침" 섹션에 쪽 번호 속성(표 150)이 위치 — 표 번호가 2~3개 밀려 있음 |
 | 수정 파일 | `src/parser/control.rs` |
@@ -209,7 +209,7 @@
 | 항목 | 내용 |
 |------|------|
 | 스펙 위치 | 표 72 (공통 객체 속성) |
-| 스펙 기술 | bit 15~17: 오브젝트 폭 기준 (0=paper, 1=page, 2=column, 3=para, 4=absolute), bit 18~19: 높이 기준 (0=paper, 1=page, 2=absolute) |
+| 스펙 기술 | bit 15\~17: 오브젝트 폭 기준 (0=paper, 1=page, 2=column, 3=para, 4=absolute), bit 18\~19: 높이 기준 (0=paper, 1=page, 2=absolute) |
 | 실제 해석 | 미설정(=0=paper)이면 한컴은 width/height를 **종이 대비 퍼센트**로 해석. 예: 42520 HU → 425.20% |
 | 올바른 설정 | 그림 삽입 시 `(4 << 15) \| (2 << 18)` = width=absolute, height=absolute 명시 필요 |
 | 수정 파일 | `src/wasm_api.rs` |
@@ -540,6 +540,114 @@ InFrontOfText(글앞으로, text_wrap=3) / BehindText(글뒤로, text_wrap=2) �
 | 발견일 | 2026-04-25 |
 
 **핵심 교훈**: HWP 스펙은 **데이터 포맷 스펙이지 조판 알고리즘 스펙이 아니다**. 스펙대로 처리해도 한컴과 다른 결과가 나오면 한컴 시각 결과를 정답으로 삼아 의도를 역공학해야 한다. rhwp 는 "스펙 충실 구현체" 가 아니라 **"한컴 조판 결과를 재현하는 엔진"** 이어야 한다.
+
+---
+
+## 31. PAGE_BORDER_FILL 위치 기준 — HWP3 보정과 HWP5/HWPX 계약을 혼합하면 회귀 발생
+
+| 항목 | 내용 |
+|------|------|
+| 스펙 위치 | 표 136 (쪽 테두리/배경 속성), `HWPTAG_PAGE_BORDER_FILL.attr bit 0` |
+| 스펙 기술 | bit 0 `0=본문 기준`, `1=종이 기준` |
+| OWPML 대응 | `hp:pageBorderFill@textBorder`: `CONTENT=본문 기준`, `PAPER=종이 기준` |
+| 한컴 UI 관찰 | 한컴 에디터 UI에서는 HWP5/HWPX export 파일의 쪽 테두리 기준이 "쪽 기준"으로 표시될 수 있음. 이 UI 용어는 `CommonObjAttr::Page`와 같은 일반 개체 위치 기준이 아니며, `PAGE_BORDER_FILL`의 위치 기준 문맥에서 별도로 해석해야 한다. |
+| 회귀 이력 | PR #956(`@jangster77`)은 HWP5/HWPX 다수 샘플 실측을 근거로 page border outline을 paper-based로 강제해 #952 회귀를 수정했다. 이후 Task #987에서 HWP3 sample16의 body 기준 정합을 맞추며 공통 렌더러가 다시 `attr bit0`을 존중하도록 바뀌었고, 이 과정에서 PR #956 계열 정합이 회귀될 위험이 생겼다. |
+| 실제 문제 | HWP3 전용 보정과 HWP5/HWPX의 `PAGE_BORDER_FILL` 렌더링 계약을 하나의 `paper_based = (attr & 0x01) != 0` 로 처리하면 어느 한쪽이 깨진다. |
+| 구현 원칙 | HWP3 parser가 필요한 호환성 힌트를 만들더라도, HWP5/HWPX page border 렌더링 계약과 섞지 않는다. `PageBorderFill`에 포맷 출처 또는 명시적 기준 enum을 추가해 HWP3 body 기준 보정과 HWP5/HWPX paper-based 렌더링을 분리해야 한다. |
+| 주의 사항 | `PAGE_BORDER_FILL`의 "쪽/종이/본문" 용어와 `CommonObjAttr`의 `Paper/Page/Para/Column` 기준은 같은 이름을 쓰더라도 같은 계층의 계약이 아니다. 특히 한컴 UI의 "쪽 기준" 표시를 `CommonObjAttr::Page`로 단순 매핑하면 안 된다. |
+| 관련 코드 | `src/renderer/layout.rs::build_page_borders`, `src/renderer/layout.rs::page_number_baseline_y`, `src/parser/hwp3/mod.rs` |
+| 관련 문서 | `mydocs/pr/archives/pr_956_review.md`, `mydocs/report/task_m100_987_report.md`, `mydocs/working/task_m100_987_stage2.md` |
+| 발견일 | 2026-05-19 |
+
+### 권장 구조
+
+현재 `PageBorderFill`은 `attr` raw 값만 보존하므로, 렌더러가 포맷별 의미 차이를 판단하기 어렵다.
+다음과 같이 명시적인 계약 계층을 추가하는 방향이 안전하다.
+
+```text
+PageBorderFillBasis:
+  - Hwp5HwpxPaperOutline
+  - Hwp3BodyOutline
+  - RawAttrFallback
+```
+
+또는 같은 의미를 담는 별도 hint 필드를 두어도 된다. 핵심은 HWP3 sample16을 위해 도입한 body 기준
+보정이 HWP5/HWPX page border의 paper-based 정합을 다시 깨지 않도록 하는 것이다.
+
+---
+
+## EQEDIT (HWPTAG_EQEDIT) — `baseline` 과 `version_info` 사이 UINT2 zero 필드 누락
+
+### 스펙 문제
+
+`mydocs/tech/한글문서파일형식_5.0_revision1.3.md` 의 표 105 (수식 개체 속성) 가
+EQEDIT record 의 byte order 를 다음과 같이 정의:
+
+| 자료형 | 길이 | 설명 |
+|--------|------|------|
+| UINT32 | 4 | 속성 (스크립트 범위) |
+| WORD | 2 | 스크립트 길이 |
+| WCHAR array | 2×len | 글 수식 스크립트 |
+| HWPUNIT | 4 | 수식 글자 크기 |
+| COLORREF | 4 | 글자 색상 |
+| INT16 | 2 | base line |
+| WCHAR array | 2×len | 수식 버전 정보 |
+| WCHAR array | 2×len | 수식 폰트 이름 |
+
+→ baseline (INT16) 직후 바로 version_info 의 length 필드 (WORD) 가 오는 구조.
+
+### 실제 데이터
+
+`samples/math-001.hwp` 의 EQEDIT raw payload 분석:
+
+```
+0058: 4C 04 00 00       letter_size = 1100
+      00 00 00 00       color = 0
+      5D 00             baseLine = 93
+      00 00             ← 스펙 표 105 누락! (UINT16 zero)
+      13 00             version_info length = 19
+      [Equation Version 60]
+      07 00             font_name length = 7
+      [HYhwpEQ]
+```
+
+baseline 과 version_info length 사이에 **UINT16 zero (2 byte)** 가 위치.
+
+### hwplib 정합
+
+```java
+// hwplib/src/main/java/kr/dogfoot/hwplib/reader/bodytext/paragraph/control/eqed/ForEQEdit.java
+eqEdit.setBaseLine(sr.readSInt2());
+eqEdit.setUnknown(sr.readUInt2());        // ← 스펙 누락 영역
+eqEdit.getVersionInfo().setBytes(sr.readHWPString());
+eqEdit.getFontName().setBytes(sr.readHWPString());
+```
+
+hwplib 가 spec 누락 영역을 `unknown` UINT2 로 정확 처리. write 측도 동일 (`writeUInt2`).
+
+### 누락 시 증상
+
+UINT2 zero 를 read 하지 않으면 `[00 00]` 이 version_info length 로 오인되어:
+- 첫 string = "" (length 0)
+- 둘째 string = "Equation Version 60" (그 다음 `[13 00]` 을 length 19 로 읽음)
+
+→ (version_info, font_name) 자리값 **swap**. 한컴이 잘못된 byte align 으로 후속
+record (PARA_TEXT 등) 를 읽어 **본문 텍스트 미표시** (수식만 보임).
+
+### 정정 (Task #1061)
+
+- `src/model/control.rs::Equation` 에 `unknown: u16` 필드 추가
+- `src/parser/control.rs::parse_equation_control` — baseline 후 `read_u16()` 추가
+- `src/serializer/control.rs::serialize_equation_control` — baseline 후 `write_u16(eq.unknown)` 추가
+
+### 관련 commits
+
+Task #1061 (2026-05-22).
+
+### 메모리 룰
+
+- `feedback_diagnosis_layer_attribution` — EQEDIT raw byte 직접 분석으로 본질 정확 식별
+- `reference_hwp2hwpx_library` — hwplib 권위 자료가 spec errata 의 결정적 근거
 
 ---
 

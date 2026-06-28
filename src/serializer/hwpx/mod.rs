@@ -309,7 +309,8 @@ mod tests {
     #[test]
     fn serialize_with_one_section_parses_back() {
         let mut doc = Document::default();
-        doc.sections.push(crate::model::document::Section::default());
+        doc.sections
+            .push(crate::model::document::Section::default());
         let bytes = serialize_hwpx(&doc).expect("serialize one-section");
         let parsed = parse_hwpx(&bytes).expect("parse back");
         assert_eq!(parsed.sections.len(), 1);
@@ -365,15 +366,20 @@ mod tests {
         std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
         // Stage 2.3 (ref_mixed 기반): 혼합 콘텐츠 + tab 속성 포함
         assert!(
-            xml.contains(r#"<hp:t>A<hp:tab width="4000" leader="0" type="1"/>B<hp:lineBreak/>C</hp:t>"#),
-            "mixed content not rendered: {}", xml
+            xml.contains(
+                r#"<hp:t>A<hp:tab width="4000" leader="0" type="1"/>B<hp:lineBreak/>C</hp:t>"#
+            ),
+            "mixed content not rendered: {}",
+            xml
         );
     }
 
     #[test]
     fn equation_control_roundtrip_preserves_script() {
         use crate::model::control::{Control, Equation};
-        use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo};
+        use crate::model::shape::{
+            CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertAlign, VertRelTo,
+        };
         use crate::model::Padding;
 
         let mut doc = Document::default();
@@ -390,7 +396,12 @@ mod tests {
                 height: 1200,
                 vertical_offset: 80,
                 horizontal_offset: 160,
-                margin: Padding { left: 10, right: 20, top: 30, bottom: 40 },
+                margin: Padding {
+                    left: 10,
+                    right: 20,
+                    top: 30,
+                    bottom: 40,
+                },
                 treat_as_char: true,
                 text_wrap: TextWrap::TopAndBottom,
                 vert_rel_to: VertRelTo::Para,
@@ -403,6 +414,7 @@ mod tests {
             font_size: 1000,
             color: 0x000000FF,
             baseline: 120,
+            unknown: 0,
             font_name: "HYhwpEQ".to_string(),
             version_info: "Equation Version 60".to_string(),
             raw_ctrl_data: Vec::new(),
@@ -473,14 +485,17 @@ mod tests {
 
         let mut doc = Document::default();
         // Table::default() 의 border_fill_id(0) 가 검증을 통과하도록 등록
-        doc.doc_info.border_fills.push(crate::model::style::BorderFill::default());
+        doc.doc_info
+            .border_fills
+            .push(crate::model::style::BorderFill::default());
         let mut section = crate::model::document::Section::default();
         let mut para = crate::model::paragraph::Paragraph::default();
         para.text = "ACB".to_string();
         para.char_offsets = vec![0, 9, 18];
         para.char_count = 20;
         para.controls.push(Control::ColumnDef(ColumnDef::default()));
-        para.controls.push(Control::Table(Box::new(Table::default())));
+        para.controls
+            .push(Control::Table(Box::new(Table::default())));
         para.controls.push(Control::Equation(Box::new(Equation {
             common: CommonObjAttr {
                 width: 1000,
@@ -617,11 +632,7 @@ mod tests {
                 "[#{}] font_name must roundtrip",
                 i
             );
-            assert_eq!(
-                rep.color, orig.color,
-                "[#{}] color must roundtrip",
-                i
-            );
+            assert_eq!(rep.color, orig.color, "[#{}] color must roundtrip", i);
             assert_eq!(
                 rep.common.width, orig.common.width,
                 "[#{}] common.width must roundtrip",
@@ -726,7 +737,8 @@ mod tests {
     #[test]
     fn hancom_required_files_present() {
         let mut doc = Document::default();
-        doc.sections.push(crate::model::document::Section::default());
+        doc.sections
+            .push(crate::model::document::Section::default());
         let bytes = serialize_hwpx(&doc).expect("serialize");
         // ZIP 파일 목록에 한컴 필수 11개가 모두 있는지 확인
         let cursor = std::io::Cursor::new(&bytes);
@@ -746,11 +758,7 @@ mod tests {
             "META-INF/manifest.xml",
         ];
         for r in &required {
-            assert!(
-                names.iter().any(|n| n == r),
-                "missing required file: {}",
-                r
-            );
+            assert!(names.iter().any(|n| n == r), "missing required file: {}", r);
         }
     }
 
@@ -884,6 +892,8 @@ mod tests {
         para.controls.push(Control::Footnote(Box::new(Footnote {
             number: 1,
             paragraphs: vec![fn_para],
+            after_decoration_letter: 0x0029,
+            ..Default::default()
         })));
 
         let mut en_para = Paragraph::default();
@@ -891,6 +901,8 @@ mod tests {
         para.controls.push(Control::Endnote(Box::new(Endnote {
             number: 1,
             paragraphs: vec![en_para],
+            after_decoration_letter: 0x0029,
+            ..Default::default()
         })));
 
         section.paragraphs.push(para);
@@ -903,17 +915,13 @@ mod tests {
         let mut sec0 = archive.by_name("Contents/section0.xml").expect("section0");
         let mut xml = String::new();
         std::io::Read::read_to_string(&mut sec0, &mut xml).expect("read");
+        assert!(xml.contains("<hp:footNote"), "footNote missing: {}", xml);
+        assert!(xml.contains("<hp:endNote"), "endNote missing: {}", xml);
         assert!(
-            xml.contains("<hp:footNote"),
-            "footNote missing: {}",
+            xml.contains("각주 텍스트"),
+            "footnote text missing: {}",
             xml
         );
-        assert!(
-            xml.contains("<hp:endNote"),
-            "endNote missing: {}",
-            xml
-        );
-        assert!(xml.contains("각주 텍스트"), "footnote text missing: {}", xml);
         assert!(xml.contains("미주 텍스트"), "endnote text missing: {}", xml);
         drop(sec0);
 

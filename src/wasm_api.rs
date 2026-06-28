@@ -259,7 +259,9 @@ impl HwpDocument {
         use crate::renderer::layer_renderer::LayerRenderer;
         use crate::renderer::web_canvas::WebCanvasRenderer;
 
-        let tree = self.build_page_layer_tree(page_num).map_err(JsValue::from)?;
+        let tree = self
+            .build_page_layer_tree(page_num)
+            .map_err(JsValue::from)?;
 
         let scale = normalize_canvas_scale(tree.page_width, tree.page_height, scale)
             .map_err(JsValue::from_str)?;
@@ -294,21 +296,25 @@ impl HwpDocument {
         scale: f64,
         layer_kind: &str,
     ) -> Result<(), JsValue> {
+        use crate::model::shape::TextWrap;
         use crate::renderer::layer_renderer::LayerRenderer;
         use crate::renderer::web_canvas::{LayerFilter, WebCanvasRenderer};
-        use crate::model::shape::TextWrap;
 
         let filter = match layer_kind {
             "all" => LayerFilter::All,
             "flow" => LayerFilter::FlowOnly,
             "behind" => LayerFilter::WrapOnly(TextWrap::BehindText),
             "front" => LayerFilter::WrapOnly(TextWrap::InFrontOfText),
-            _ => return Err(JsValue::from_str(
-                "invalid layer_kind: 'all' | 'flow' | 'behind' | 'front'",
-            )),
+            _ => {
+                return Err(JsValue::from_str(
+                    "invalid layer_kind: 'all' | 'flow' | 'behind' | 'front'",
+                ))
+            }
         };
 
-        let tree = self.build_page_layer_tree(page_num).map_err(JsValue::from)?;
+        let tree = self
+            .build_page_layer_tree(page_num)
+            .map_err(JsValue::from)?;
 
         let scale = normalize_canvas_scale(tree.page_width, tree.page_height, scale)
             .map_err(JsValue::from_str)?;
@@ -371,6 +377,24 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// CanvasKit direct replay 정책 진단을 JSON 문자열로 반환한다.
+    ///
+    /// `mode` 는 `"default"` 또는 `"compat"` 를 받는다. 빈 문자열은 `"default"` 로 처리한다.
+    /// 현재 두 mode 모두 hidden Canvas2D overlay 없이 direct replay required 정책을 따른다.
+    /// `compat` 는 API/URL 호환성과 이후 보수적인 direct replay 튜닝을 위해 남겨 둔 선택지다.
+    #[wasm_bindgen(js_name = getCanvasKitReplayPlan)]
+    pub fn get_canvaskit_replay_plan(&self, page_num: u32, mode: &str) -> Result<String, JsValue> {
+        self.get_canvaskit_replay_plan_native(page_num, mode)
+            .map_err(|e| e.into())
+    }
+
+    /// 페이지 overlay 이미지 정보만 JSON 문자열로 반환한다.
+    #[wasm_bindgen(js_name = getPageOverlayImages)]
+    pub fn get_page_overlay_images(&self, page_num: u32) -> Result<String, JsValue> {
+        self.get_page_overlay_images_native(page_num)
+            .map_err(|e| e.into())
+    }
+
     /// 페이지 정보를 JSON 문자열로 반환한다.
     #[wasm_bindgen(js_name = getPageInfo)]
     pub fn get_page_info(&self, page_num: u32) -> Result<String, JsValue> {
@@ -414,7 +438,11 @@ impl HwpDocument {
     /// 현재 구역의 다단 설정을 JSON으로 반환한다.
     #[wasm_bindgen(js_name = getColumnDef)]
     pub fn get_column_def(&self, section_idx: u32) -> Result<String, JsValue> {
-        let sec = self.core.document.sections.get(section_idx as usize)
+        let sec = self
+            .core
+            .document
+            .sections
+            .get(section_idx as usize)
             .ok_or_else(|| JsValue::from_str("구역 인덱스 범위 초과"))?;
         let col_def = HwpDocument::find_initial_column_def(&sec.paragraphs);
         let col_type = match col_def.column_type {
@@ -1226,6 +1254,27 @@ impl HwpDocument {
             section_idx as usize,
             para_idx as usize,
             char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 새 번호 지정 컨트롤 삽입 (쪽 > 새 번호로 시작)
+    #[wasm_bindgen(js_name = insertNewNumber)]
+    pub fn insert_new_number(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        char_offset: u32,
+        start_num: u32,
+    ) -> Result<String, JsValue> {
+        if start_num == 0 || start_num > 65535 {
+            return Err(JsValue::from_str("start_num must be 1~65535"));
+        }
+        self.insert_new_number_native(
+            section_idx as usize,
+            para_idx as usize,
+            char_offset as usize,
+            start_num as u16,
         )
         .map_err(|e| e.into())
     }
@@ -2167,6 +2216,25 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// [Task #919] 글상자/도형 컨트롤의 페이지 좌표 바운딩박스를 반환한다.
+    ///
+    /// 반환: JSON `{"pageIndex":<N>,"x":<f>,"y":<f>,"width":<f>,"height":<f>}`
+    /// studio 의 `isShapeBorderClick` 헬퍼에서 외곽 경계선 클릭 판별에 사용.
+    #[wasm_bindgen(js_name = getShapeBBox)]
+    pub fn get_shape_bbox(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.get_shape_bbox_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 표 컨트롤을 문단에서 삭제한다.
     ///
     /// 반환: JSON `{"ok":true}`
@@ -2323,10 +2391,18 @@ impl HwpDocument {
                     };
                     if let Some(ref path) = pic.image_attr.external_path {
                         let id = pic.image_attr.bin_data_id;
-                        let already_loaded = self.document().bin_data_content.iter()
+                        let already_loaded = self
+                            .document()
+                            .bin_data_content
+                            .iter()
                             .any(|c| c.id == id && !c.data.is_empty());
-                        if already_loaded { continue; }
-                        let basename = path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path);
+                        if already_loaded {
+                            continue;
+                        }
+                        let basename = path
+                            .rsplit(|c| c == '/' || c == '\\')
+                            .next()
+                            .unwrap_or(path);
                         names.insert(basename.to_string());
                     }
                 }
@@ -2347,7 +2423,12 @@ impl HwpDocument {
     ///                 영역 영역 fallback 영역 영역 `/samples/<basename>` 영역 사용. 한컴 viewer
     ///                 정합 영역 영역 OS 영역 절대 경로 영역 영역 (예: "/Users/.../samples/rdb02.gif")
     #[wasm_bindgen(js_name = injectExternalImage)]
-    pub fn inject_external_image(&mut self, basename: &str, data: &[u8], display_path: &str) -> u32 {
+    pub fn inject_external_image(
+        &mut self,
+        basename: &str,
+        data: &[u8],
+        display_path: &str,
+    ) -> u32 {
         use crate::model::control::Control;
         use crate::model::shape::ShapeObject;
 
@@ -2366,14 +2447,27 @@ impl HwpDocument {
                         _ => continue,
                     };
                     if let Some(ref path) = pic.image_attr.external_path {
-                        let path_basename = path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path);
-                        if path_basename != basename { continue; }
+                        let path_basename = path
+                            .rsplit(|c| c == '/' || c == '\\')
+                            .next()
+                            .unwrap_or(path);
+                        if path_basename != basename {
+                            continue;
+                        }
                         let id = pic.image_attr.bin_data_id;
-                        let already_loaded = self.document().bin_data_content.iter()
+                        let already_loaded = self
+                            .document()
+                            .bin_data_content
+                            .iter()
                             .any(|c| c.id == id && !c.data.is_empty());
-                        if already_loaded { continue; }
+                        if already_loaded {
+                            continue;
+                        }
                         let ext = std::path::Path::new(basename)
-                            .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_string();
                         targets.push((id, ext));
                     }
                 }
@@ -2387,11 +2481,13 @@ impl HwpDocument {
                 self.document_mut().bin_data_content[idx].data = data.to_vec();
                 self.document_mut().bin_data_content[idx].extension = ext;
             } else {
-                self.document_mut().bin_data_content.push(
-                    crate::model::bin_data::BinDataContent {
-                        id, data: data.to_vec(), extension: ext,
-                    }
-                );
+                self.document_mut()
+                    .bin_data_content
+                    .push(crate::model::bin_data::BinDataContent {
+                        id,
+                        data: data.to_vec(),
+                        extension: ext,
+                    });
             }
             injected += 1;
 
@@ -2417,7 +2513,8 @@ impl HwpDocument {
                             _ => continue,
                         };
                         if pic.image_attr.bin_data_id == id
-                            && pic.image_attr.external_path.is_some() {
+                            && pic.image_attr.external_path.is_some()
+                        {
                             pic.image_attr.external_path = Some(resolved.clone());
                         }
                     }
@@ -2445,6 +2542,28 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// [Task #825] 머리말/꼬리말 안 그림의 속성 조회.
+    /// path: section[si].paragraphs[outer_para].controls[outer_ctrl] = Header/Footer
+    ///       → .paragraphs[inner_para].controls[inner_ctrl] = Picture
+    #[wasm_bindgen(js_name = getHeaderFooterPictureProperties)]
+    pub fn get_header_footer_picture_properties(
+        &self,
+        section_idx: u32,
+        outer_para_idx: u32,
+        outer_control_idx: u32,
+        inner_para_idx: u32,
+        inner_control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.get_header_footer_picture_properties_native(
+            section_idx as usize,
+            outer_para_idx as usize,
+            outer_control_idx as usize,
+            inner_para_idx as usize,
+            inner_control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 그림 컨트롤의 속성을 변경한다.
     ///
     /// 반환: JSON `{"ok":true}`
@@ -2460,6 +2579,28 @@ impl HwpDocument {
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// [Task #825] 머리말/꼬리말 안 그림 속성 변경.
+    #[wasm_bindgen(js_name = setHeaderFooterPictureProperties)]
+    pub fn set_header_footer_picture_properties(
+        &mut self,
+        section_idx: u32,
+        outer_para_idx: u32,
+        outer_control_idx: u32,
+        inner_para_idx: u32,
+        inner_control_idx: u32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.set_header_footer_picture_properties_native(
+            section_idx as usize,
+            outer_para_idx as usize,
+            outer_control_idx as usize,
+            inner_para_idx as usize,
+            inner_control_idx as usize,
             props_json,
         )
         .map_err(|e| e.into())
@@ -3339,6 +3480,19 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 문서 전체 검색 (모든 매치 반환)
+    #[wasm_bindgen(js_name = searchAllText)]
+    pub fn search_all_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        include_cells: bool,
+    ) -> Result<String, JsValue> {
+        self.core
+            .search_all_text_native(query, case_sensitive, include_cells)
+            .map_err(|e| e.into())
+    }
+
     /// 텍스트 치환 (단일)
     #[wasm_bindgen(js_name = replaceText)]
     pub fn replace_text(
@@ -3368,7 +3522,8 @@ impl HwpDocument {
         new_text: &str,
         case_sensitive: bool,
     ) -> Result<String, JsValue> {
-        self.core.replace_one_native(query, new_text, case_sensitive)
+        self.core
+            .replace_one_native(query, new_text, case_sensitive)
             .map_err(|e| e.into())
     }
 
@@ -4084,19 +4239,19 @@ impl HwpDocument {
                 None => "null".to_string(),
             };
             let kind_name = match &w.kind {
-                crate::document_core::validation::WarningKind::LinesegArrayEmpty =>
-                    "LinesegArrayEmpty",
-                crate::document_core::validation::WarningKind::LinesegUncomputed =>
-                    "LinesegUncomputed",
-                crate::document_core::validation::WarningKind::LinesegTextRunReflow =>
-                    "LinesegTextRunReflow",
+                crate::document_core::validation::WarningKind::LinesegArrayEmpty => {
+                    "LinesegArrayEmpty"
+                }
+                crate::document_core::validation::WarningKind::LinesegUncomputed => {
+                    "LinesegUncomputed"
+                }
+                crate::document_core::validation::WarningKind::LinesegTextRunReflow => {
+                    "LinesegTextRunReflow"
+                }
             };
             warning_parts.push(format!(
                 r#"{{"section":{},"paragraph":{},"kind":"{}","cell":{}}}"#,
-                w.section_idx,
-                w.paragraph_idx,
-                kind_name,
-                cell_part,
+                w.section_idx, w.paragraph_idx, kind_name, cell_part,
             ));
         }
 
@@ -4473,6 +4628,7 @@ impl HwpDocument {
             english_name,
             style_type,
             next_style_id,
+            lang_id: 1042, // 한국어 default (HWP5 spec 표 47)
             para_shape_id,
             char_shape_id,
         };
