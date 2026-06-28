@@ -26,6 +26,8 @@ pub struct PackageInfo {
     pub section_files: Vec<String>,
     /// BinData 항목 목록
     pub bin_data_items: Vec<PackageItem>,
+    /// 바탕쪽 XML 항목 목록 (id="masterpage{N}" → href). secPr 의 idRef 로 조회.
+    pub master_page_items: Vec<PackageItem>,
 }
 
 /// content.hpf XML을 파싱하여 섹션/BinData 목록을 추출한다.
@@ -99,6 +101,19 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
     for (id, href, media_type) in &all_items {
         if href.starts_with("BinData/") || href.contains("/BinData/") {
             info.bin_data_items.push(PackageItem {
+                href: href.clone(),
+                media_type: media_type.clone(),
+                id: id.clone(),
+            });
+        }
+    }
+
+    // 바탕쪽 항목 추출 (id 가 "masterpage" 로 시작 또는 href 에 masterpage 포함).
+    // secPr 의 <hp:masterPage idRef="..."/> 가 이 id 를 참조한다.
+    for (id, href, media_type) in &all_items {
+        let is_master = id.starts_with("masterpage") || href.contains("masterpage");
+        if is_master && media_type == "application/xml" {
+            info.master_page_items.push(PackageItem {
                 href: href.clone(),
                 media_type: media_type.clone(),
                 id: id.clone(),

@@ -222,6 +222,13 @@ pub struct SectionDef {
     pub extra_child_records: Vec<RawRecord>,
     /// 바탕쪽 (extra_child_records에서 파싱, 렌더링 전용)
     pub master_pages: Vec<MasterPage>,
+    /// HWPX 파싱 전용: `<hp:secPr>` 안의 `<hp:masterPage idRef>` 목록.
+    ///
+    /// HWPX 는 바탕쪽을 별도 `Contents/masterpage{N}.xml` 파일에 두고 secPr 에서 idRef 로
+    /// 참조한다. 섹션 파서는 idRef 만 수집하고, mod.rs 가 해당 파일을 파싱해
+    /// `master_pages` 를 채운다 (HWP5 의 inline LIST_HEADER 와 달리 2-pass).
+    /// HWP5/직렬화 경로에서는 비어 있다.
+    pub master_page_id_refs: Vec<String>,
 }
 
 impl Document {

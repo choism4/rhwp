@@ -111,7 +111,7 @@ fn parse_page_margin(e: &quick_xml::events::BytesStart, page: &mut PageDef) {
 
 // ─── Paragraph ───
 
-fn parse_paragraph(
+pub(super) fn parse_paragraph(
     e: &quick_xml::events::BytesStart,
     reader: &mut Reader<&[u8]>,
 ) -> Result<(Paragraph, Option<SectionDef>), HwpxError> {
@@ -382,6 +382,7 @@ fn parse_sec_pr_children(reader: &mut Reader<&[u8]>, sec_def: &mut SectionDef) -
                     b"colPr" => { col_def = Some(parse_col_pr(e)); }
                     b"startNum" => parse_start_num(e, sec_def),
                     b"visibility" => parse_visibility(e, sec_def),
+                    b"masterPage" => parse_master_page_ref(e, sec_def),
                     _ => {}
                 }
             }
@@ -393,6 +394,7 @@ fn parse_sec_pr_children(reader: &mut Reader<&[u8]>, sec_def: &mut SectionDef) -
                     b"colPr" => { col_def = Some(parse_col_pr(e)); }
                     b"startNum" => parse_start_num(e, sec_def),
                     b"visibility" => parse_visibility(e, sec_def),
+                    b"masterPage" => parse_master_page_ref(e, sec_def),
                     _ => {}
                 }
             }
@@ -409,6 +411,21 @@ fn parse_sec_pr_children(reader: &mut Reader<&[u8]>, sec_def: &mut SectionDef) -
         buf.clear();
     }
     Ok(col_def)
+}
+
+/// `<hp:masterPage idRef="masterpage{N}"/>` 참조 수집.
+///
+/// 실제 바탕쪽 내용은 별도 `Contents/masterpage{N}.xml` 파일에 있다. 여기서는
+/// idRef 만 모으고, mod.rs 가 파일을 파싱해 `sec_def.master_pages` 를 채운다.
+fn parse_master_page_ref(e: &quick_xml::events::BytesStart, sec_def: &mut SectionDef) {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == b"idRef" {
+            let id = attr_str(&attr);
+            if !id.is_empty() {
+                sec_def.master_page_id_refs.push(id);
+            }
+        }
+    }
 }
 
 /// <hp:startNum> 요소 파싱

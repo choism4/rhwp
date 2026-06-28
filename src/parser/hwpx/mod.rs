@@ -12,6 +12,7 @@
 
 pub mod content;
 pub mod header;
+pub mod master_page;
 pub mod reader;
 pub mod section;
 pub mod utils;
@@ -98,6 +99,34 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
             Err(e) => {
                 eprintln!("경고: {} 파싱 실패: {}", section_href, e);
                 sections.push(Section::default());
+            }
+        }
+    }
+
+    // 4-1. 바탕쪽 연결: secPr 의 <hp:masterPage idRef> → Contents/masterpage{N}.xml 파싱.
+    //
+    // HWPX 는 바탕쪽을 본문 밖 별도 파일에 두므로(HWP5 inline LIST_HEADER 와 다름),
+    // 섹션 파서가 모은 idRef 를 manifest 항목으로 조회해 파싱한 뒤 master_pages 에 채운다.
+    // 이로써 꼬리말 쪽번호(footer AutoNumber)가 렌더 경로에 노출된다.
+    if !package_info.master_page_items.is_empty() {
+        for section in sections.iter_mut() {
+            let id_refs = std::mem::take(&mut section.section_def.master_page_id_refs);
+            for id_ref in &id_refs {
+                let Some(item) = package_info
+                    .master_page_items
+                    .iter()
+                    .find(|it| &it.id == id_ref)
+                else {
+                    eprintln!("경고: 바탕쪽 idRef '{}' 매니페스트에 없음", id_ref);
+                    continue;
+                };
+                match reader.read_file(&item.href) {
+                    Ok(mp_xml) => match master_page::parse_hwpx_master_page(&mp_xml) {
+                        Ok(mp) => section.section_def.master_pages.push(mp),
+                        Err(e) => eprintln!("경고: {} 파싱 실패: {}", item.href, e),
+                    },
+                    Err(e) => eprintln!("경고: {} 읽기 실패: {}", item.href, e),
+                }
             }
         }
     }
