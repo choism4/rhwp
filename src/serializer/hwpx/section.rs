@@ -63,6 +63,21 @@ pub fn write_section(
     _index: usize,
     ctx: &mut SerializeContext,
 ) -> Result<Vec<u8>, SerializeError> {
+    write_section_with_master_pages(section, _doc, _index, ctx, &[])
+}
+
+/// `write_section` + 바탕쪽(masterPage) 참조 주입.
+///
+/// `master_page_ids` 는 이 섹션의 바탕쪽에 부여된 **문서 전역 인덱스** 목록이다
+/// (`mod.rs` 가 파일/매니페스트 ID 와 동일하게 할당). 비어 있으면 기존 동작 그대로
+/// (`masterPageCnt="0"`, masterPage 참조 없음) — 회귀 0.
+pub fn write_section_with_master_pages(
+    section: &Section,
+    _doc: &Document,
+    _index: usize,
+    ctx: &mut SerializeContext,
+    master_page_ids: &[usize],
+) -> Result<Vec<u8>, SerializeError> {
     let mut vert_cursor: u32 = 0;
 
     let first_para = section.paragraphs.first();
@@ -115,7 +130,38 @@ pub fn write_section(
         out = out.replacen(PARA_CLOSE, &format!("</hp:p>{}</hs:sec>", extra), 1);
     }
 
+    // 바탕쪽 참조 주입: masterPageCnt 갱신 + <hp:masterPage idRef=.../> 삽입.
+    // reference(exam-kor-1p.hwpx)와 동일하게 secPr 의 모든 자식 뒤(</hp:secPr> 직전)에 배치.
+    if !master_page_ids.is_empty() {
+        out = inject_master_page_refs(out, master_page_ids);
+    }
+
     Ok(out.into_bytes())
+}
+
+/// secPr 에 바탕쪽 참조를 주입한다.
+///
+/// 1) `masterPageCnt="0"` → 실제 개수.
+/// 2) `</hp:secPr>` 직전에 `<hp:masterPage idRef="masterpage{K}"/>` × N 삽입.
+///
+/// 둘 다 못 찾으면(템플릿 변동) 원본을 그대로 반환하여 손상 방지.
+fn inject_master_page_refs(out: String, master_page_ids: &[usize]) -> String {
+    const CNT_FROM: &str = r#"masterPageCnt="0""#;
+    const SECPR_CLOSE: &str = "</hp:secPr>";
+
+    if !out.contains(CNT_FROM) || !out.contains(SECPR_CLOSE) {
+        return out;
+    }
+
+    let cnt_to = format!(r#"masterPageCnt="{}""#, master_page_ids.len());
+    let out = out.replacen(CNT_FROM, &cnt_to, 1);
+
+    let mut refs = String::new();
+    for &gid in master_page_ids {
+        refs.push_str(&format!(r#"<hp:masterPage idRef="masterpage{}"/>"#, gid));
+    }
+    let replacement = format!("{}{}", refs, SECPR_CLOSE);
+    out.replacen(SECPR_CLOSE, &replacement, 1)
 }
 
 /// `PageDef` → `<hp:pagePr><hp:margin/></hp:pagePr>` 직렬화.
@@ -179,6 +225,41 @@ fn render_paragraph_parts(para: &Paragraph, vert_start: u32, ctx: &mut Serialize
         let (linesegs, vert_end) = render_lineseg_array_fallback(&para.text, vert_start);
         (t_xml, linesegs, vert_end)
     }
+}
+
+/// 문단 리스트를 `<hp:p>...</hp:p>` 시퀀스로 직렬화한다 (바탕쪽 subList 재사용).
+///
+/// `write_section` 의 본문 문단 렌더 경로(`render_paragraph_parts` + 컨트롤 슬롯)를
+/// 그대로 재사용하여, 바탕쪽 안 도형/표/글상자/쪽번호(AutoNumber)가 본문과 동일한
+/// 규칙으로 출력되도록 한다. 빈 리스트면 빈 문단 하나를 출력(한컴 subList 최소 요건).
+pub(super) fn render_paragraphs_as_hp_p(
+    paragraphs: &[Paragraph],
+    ctx: &mut SerializeContext,
+) -> String {
+    if paragraphs.is_empty() {
+        return concat!(
+            r#"<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">"#,
+            r#"<hp:run charPrIDRef="0"><hp:t/></hp:run>"#,
+            r#"<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>"#,
+            r#"</hp:p>"#,
+        )
+        .to_string();
+    }
+
+    let mut out = String::new();
+    let mut vert_cursor: u32 = 0;
+    for (idx, p) in paragraphs.iter().enumerate() {
+        let (t, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx);
+        vert_cursor = advance;
+        let cs = first_run_char_shape_id(p);
+        out.push_str(&render_hp_p_open(p, idx as u32));
+        out.push_str(&format!(r#"<hp:run charPrIDRef="{}">"#, cs));
+        out.push_str(&t);
+        out.push_str(r#"</hp:run><hp:linesegarray>"#);
+        out.push_str(&linesegs);
+        out.push_str(r#"</hp:linesegarray></hp:p>"#);
+    }
+    out
 }
 
 /// IR 없이 텍스트만 있을 때 `<hp:t>` 와 fallback lineseg 생성.

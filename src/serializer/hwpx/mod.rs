@@ -14,6 +14,7 @@ pub mod context;
 pub mod field;
 pub mod fixtures;
 pub mod header;
+pub mod master_page;
 pub mod picture;
 pub mod roundtrip;
 pub mod section;
@@ -56,12 +57,32 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     z.write_deflated("Contents/header.xml", &header_xml)?;
 
     // 4. Contents/section{N}.xml — 실제 섹션만큼, 없으면 0개
+    //    바탕쪽(masterPage)은 문서 전역 인덱스를 섹션 순서대로 할당한다
+    //    (섹션0 의 바탕쪽이 0..k0, 섹션1 이 k0..k1, ...). 섹션은 자신의 ID 목록을
+    //    secPr 참조로 출력하고, mod.rs 가 동일 ID 로 파일/매니페스트를 만든다.
     let section_hrefs: Vec<String> = (0..doc.sections.len())
         .map(|i| format!("Contents/section{}.xml", i))
         .collect();
+    let mut master_page_global: usize = 0;
+    let mut master_page_entries: Vec<content::MasterPageEntry> = Vec::new();
     for (i, sec) in doc.sections.iter().enumerate() {
-        let xml = section::write_section(sec, doc, i, &mut ctx)?;
+        let mps = &sec.section_def.master_pages;
+        let ids: Vec<usize> = (0..mps.len()).map(|k| master_page_global + k).collect();
+
+        let xml = section::write_section_with_master_pages(sec, doc, i, &mut ctx, &ids)?;
         z.write_deflated(&section_hrefs[i], &xml)?;
+
+        for (k, mp) in mps.iter().enumerate() {
+            let gid = master_page_global + k;
+            let href = format!("Contents/masterpage{}.xml", gid);
+            let mp_xml = master_page::write_master_page(mp, gid, &mut ctx)?;
+            z.write_deflated(&href, &mp_xml)?;
+            master_page_entries.push(content::MasterPageEntry {
+                id: format!("masterpage{}", gid),
+                href,
+            });
+        }
+        master_page_global += mps.len();
     }
 
     // 5. Preview/PrvText.txt + Preview/PrvImage.png
@@ -103,7 +124,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
             media_type: e.media_type.clone(),
         })
         .collect();
-    let content_hpf = content::write_content_hpf(&section_hrefs, &content_bin_entries)?;
+    let content_hpf =
+        content::write_content_hpf(&section_hrefs, &content_bin_entries, &master_page_entries)?;
     z.write_deflated("Contents/content.hpf", &content_hpf)?;
 
     // 10. META-INF/container.xml
@@ -155,6 +177,133 @@ mod tests {
         let parsed = parse_hwpx(&bytes).expect("parse back");
         assert_eq!(parsed.sections.len(), 0);
         assert!(parsed.bin_data_content.is_empty());
+    }
+
+    /// ⑦B: 빈 문서(바탕쪽 없음)는 masterPageCnt="0" + masterpage 파일 0개 (회귀 0).
+    #[test]
+    fn empty_doc_has_no_master_page_files() {
+        let mut doc = Document::default();
+        doc.sections.push(crate::model::document::Section::default());
+        let bytes = serialize_hwpx(&doc).expect("serialize");
+        let cursor = std::io::Cursor::new(&bytes);
+        let archive = zip::ZipArchive::new(cursor).expect("zip");
+        let names: Vec<String> = archive.file_names().map(String::from).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("masterpage")),
+            "바탕쪽 없는 문서에 masterpage 파일이 생기면 안 됨: {:?}",
+            names
+        );
+
+        let cursor2 = std::io::Cursor::new(&bytes);
+        let mut a2 = zip::ZipArchive::new(cursor2).expect("zip");
+        let mut s0 = a2.by_name("Contents/section0.xml").expect("section0");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut s0, &mut xml).expect("read");
+        assert!(xml.contains(r#"masterPageCnt="0""#), "masterPageCnt 가 0 이어야 함");
+        assert!(!xml.contains("<hp:masterPage"), "masterPage 참조가 없어야 함");
+    }
+
+    /// ⑦B: 바탕쪽(footer 쪽번호 AutoNumber)을 가진 한컴 origin HWP 가
+    /// HWPX 직렬화에서 masterpage 파일 + secPr 참조 + autoNum 쪽번호를 보존한다.
+    ///
+    /// 한컴 reference(`samples/hwpx/exam-kor-1p.hwpx`)의 masterpage 구조와 동형:
+    /// `<masterPage type=".."><hp:subList>...<hp:autoNum numType="PAGE"><hp:autoNumFormat/></hp:autoNum></hp:subList></masterPage>`
+    #[test]
+    fn master_page_page_number_serialized_to_hwpx() {
+        use crate::parser::parse_hwp;
+
+        let bytes = std::fs::read("samples/21_언어_기출_편집가능본.hwp")
+            .expect("samples/21_언어_기출_편집가능본.hwp must be readable");
+        let doc = parse_hwp(&bytes).expect("parse hancom origin hwp");
+
+        // 전제: IR 에 바탕쪽 + Page AutoNumber 가 보존돼 있어야 의미있는 회귀.
+        let total_mps: usize = doc
+            .sections
+            .iter()
+            .map(|s| s.section_def.master_pages.len())
+            .sum();
+        assert!(total_mps > 0, "fixture 에 바탕쪽이 있어야 함");
+
+        let out = serialize_hwpx(&doc).expect("serialize hwpx");
+        let cursor = std::io::Cursor::new(&out);
+        let mut archive = zip::ZipArchive::new(cursor).expect("valid zip");
+
+        // 1) masterpage 파일이 바탕쪽 개수만큼 존재.
+        let names: Vec<String> = archive.file_names().map(String::from).collect();
+        let mp_files = names
+            .iter()
+            .filter(|n| n.starts_with("Contents/masterpage") && n.ends_with(".xml"))
+            .count();
+        assert_eq!(
+            mp_files, total_mps,
+            "masterpage 파일 개수가 바탕쪽 개수와 일치해야 함"
+        );
+
+        // 2) section0 secPr 에 masterPageCnt>0 + masterPage 참조.
+        let mut s0 = archive.by_name("Contents/section0.xml").expect("section0");
+        let mut sec_xml = String::new();
+        std::io::Read::read_to_string(&mut s0, &mut sec_xml).expect("read sec");
+        assert!(
+            !sec_xml.contains(r#"masterPageCnt="0""#),
+            "masterPageCnt 가 0 이 아니어야 함"
+        );
+        assert!(
+            sec_xml.contains(r#"<hp:masterPage idRef="masterpage0"/>"#),
+            "secPr 에 masterPage 참조가 있어야 함"
+        );
+        drop(s0);
+
+        // 3) masterpage0.xml 이 schema 동형: <masterPage> 루트 + <hp:subList>.
+        let mut mp0 = archive.by_name("Contents/masterpage0.xml").expect("masterpage0");
+        let mut mp_xml = String::new();
+        std::io::Read::read_to_string(&mut mp0, &mut mp_xml).expect("read mp");
+        assert!(mp_xml.contains("<masterPage "), "masterPage 루트 요소 누락");
+        assert!(mp_xml.contains("<hp:subList "), "subList 래퍼 누락");
+        assert!(
+            mp_xml.contains(r#"id="masterpage0""#),
+            "masterPage id 속성 누락"
+        );
+        drop(mp0);
+
+        // 4) 어딘가의 masterpage 파일에 쪽번호 AutoNumber(numType="PAGE") 가 보존.
+        let mut found_page_autonum = false;
+        let mp_names: Vec<String> = names
+            .iter()
+            .filter(|n| n.starts_with("Contents/masterpage") && n.ends_with(".xml"))
+            .cloned()
+            .collect();
+        for name in &mp_names {
+            let mut f = archive.by_name(name).expect("mp file");
+            let mut x = String::new();
+            std::io::Read::read_to_string(&mut f, &mut x).expect("read");
+            if x.contains(r#"numType="PAGE""#) && x.contains("<hp:autoNumFormat ") {
+                found_page_autonum = true;
+                break;
+            }
+        }
+        assert!(
+            found_page_autonum,
+            "바탕쪽 어딘가에 쪽번호 AutoNumber(numType=PAGE)가 보존돼야 함"
+        );
+
+        // 5) content.hpf manifest 에 masterpage 등록 (spine 에는 없음).
+        let mut hpf = archive.by_name("Contents/content.hpf").expect("content.hpf");
+        let mut hpf_xml = String::new();
+        std::io::Read::read_to_string(&mut hpf, &mut hpf_xml).expect("read hpf");
+        assert!(
+            hpf_xml.contains(r#"<opf:item id="masterpage0" href="Contents/masterpage0.xml""#),
+            "content.hpf manifest 에 masterpage 항목이 있어야 함"
+        );
+        assert!(
+            !hpf_xml.contains(r#"<opf:itemref idref="masterpage0""#),
+            "masterpage 는 spine 에 넣지 않아야 함 (reference 동일)"
+        );
+
+        // 6) 직렬화 결과가 다시 파싱돼야 함 (스키마 유효성 — 에러 없이 통과).
+        drop(hpf);
+        drop(archive);
+        let reparsed = parse_hwpx(&out).expect("fresh hwpx must reparse without error");
+        assert_eq!(reparsed.sections.len(), doc.sections.len());
     }
 
     #[test]

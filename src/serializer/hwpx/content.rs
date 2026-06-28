@@ -18,10 +18,18 @@ pub struct BinDataEntry {
     pub media_type: String,
 }
 
+/// 바탕쪽 manifest 엔트리 (id, href). spine 에는 넣지 않는다.
+#[derive(Debug, Clone)]
+pub struct MasterPageEntry {
+    pub id: String,
+    pub href: String,
+}
+
 /// content.hpf XML 생성
 pub fn write_content_hpf(
     section_hrefs: &[String],
     bin_data: &[BinDataEntry],
+    master_pages: &[MasterPageEntry],
 ) -> Result<Vec<u8>, SerializeError> {
     let buf = Cursor::new(Vec::new());
     let mut w = Writer::new(buf);
@@ -87,6 +95,19 @@ pub fn write_content_hpf(
             &[
                 ("id", id.as_str()),
                 ("href", href.as_str()),
+                ("media-type", "application/xml"),
+            ],
+        )?;
+    }
+
+    // 바탕쪽(masterpage{N}) manifest 등록 — spine 에는 넣지 않는다 (reference 동일).
+    for mp in master_pages {
+        empty_tag(
+            &mut w,
+            "opf:item",
+            &[
+                ("id", mp.id.as_str()),
+                ("href", mp.href.as_str()),
                 ("media-type", "application/xml"),
             ],
         )?;

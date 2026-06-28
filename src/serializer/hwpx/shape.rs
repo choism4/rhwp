@@ -17,6 +17,7 @@ use std::io::Write;
 
 use quick_xml::Writer;
 
+use crate::model::control::{AutoNumber, AutoNumberType, Control};
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{
     CommonObjAttr, HorzAlign, HorzRelTo, LineShape, RectangleShape, TextBox, TextWrap,
@@ -25,6 +26,82 @@ use crate::model::shape::{
 
 use super::utils::{empty_tag, end_tag, start_tag, start_tag_attrs};
 use super::SerializeError;
+
+/// AutoNumber.number_type → OWPML `numType` 문자열.
+fn auto_num_type_str(t: AutoNumberType) -> &'static str {
+    match t {
+        AutoNumberType::Page => "PAGE",
+        AutoNumberType::Footnote => "FOOTNOTE",
+        AutoNumberType::Endnote => "ENDNOTE",
+        AutoNumberType::Picture => "FIGURE",
+        AutoNumberType::Table => "TABLE",
+        AutoNumberType::Equation => "EQUATION",
+    }
+}
+
+/// AutoNumber.format(u8) → OWPML `autoNumFormat type` 문자열.
+///
+/// 파서(`parser/hwpx/section.rs`)의 `formatType`/HWP 번호형식 매핑 역방향.
+/// 한컴 reference(`samples/hwpx/exam-kor-*.hwpx`)의 쪽번호는 모두 DIGIT 이며,
+/// 미상 값은 DIGIT 로 안전 폴백한다.
+fn auto_num_format_str(format: u8) -> &'static str {
+    match format {
+        0 => "DIGIT",
+        1 => "CIRCLE_DIGIT",
+        2 => "ROMAN_CAPITAL",
+        3 => "ROMAN_SMALL",
+        4 => "LATIN_CAPITAL",
+        5 => "LATIN_SMALL",
+        6 => "HANGUL",
+        7 => "HANJA",
+        _ => "DIGIT",
+    }
+}
+
+/// `<hp:ctrl><hp:autoNum .../></hp:ctrl>` 직렬화 — 쪽번호(AutoNumber) 컨트롤.
+///
+/// 한컴 reference(`samples/hwpx/exam-kor-0.hwpx` masterpage0.xml)의 인코딩과 동형:
+/// `<hp:ctrl><hp:autoNum num=".." numType="PAGE"><hp:autoNumFormat type=".."
+/// userChar="" prefixChar="" suffixChar="" supscript=".."/></hp:autoNum></hp:ctrl>`
+fn write_auto_num<W: Write>(w: &mut Writer<W>, an: &AutoNumber) -> Result<(), SerializeError> {
+    start_tag(w, "hp:ctrl")?;
+    let num = an.number.to_string();
+    start_tag_attrs(
+        w,
+        "hp:autoNum",
+        &[("num", &num), ("numType", auto_num_type_str(an.number_type))],
+    )?;
+    let supscript = if an.superscript { "1" } else { "0" };
+    let user_char = if an.user_symbol == '\0' {
+        String::new()
+    } else {
+        an.user_symbol.to_string()
+    };
+    let prefix_char = if an.prefix_char == '\0' {
+        String::new()
+    } else {
+        an.prefix_char.to_string()
+    };
+    let suffix_char = if an.suffix_char == '\0' {
+        String::new()
+    } else {
+        an.suffix_char.to_string()
+    };
+    empty_tag(
+        w,
+        "hp:autoNumFormat",
+        &[
+            ("type", auto_num_format_str(an.format)),
+            ("userChar", &user_char),
+            ("prefixChar", &prefix_char),
+            ("suffixChar", &suffix_char),
+            ("supscript", supscript),
+        ],
+    )?;
+    end_tag(w, "hp:autoNum")?;
+    end_tag(w, "hp:ctrl")?;
+    Ok(())
+}
 
 // =====================================================================
 // <hp:rect>
@@ -240,12 +317,9 @@ fn write_draw_text_paragraph<W: Write>(
     let cs_str = cs.to_string();
     start_tag_attrs(w, "hp:run", &[("charPrIDRef", &cs_str)])?;
 
-    // simple text output — XML escape
-    start_tag(w, "hp:t")?;
-    w.write_event(quick_xml::events::Event::Text(
-        quick_xml::events::BytesText::new(&super::utils::xml_escape(&p.text)),
-    )).map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
-    end_tag(w, "hp:t")?;
+    // 인라인 컨트롤(쪽번호 AutoNumber 등)을 char_offsets 위치에 맞춰 텍스트와 교차 출력.
+    // 컨트롤이 없으면 단순 <hp:t> 한 번. 있으면 텍스트 조각 사이에 <hp:ctrl> 삽입.
+    write_draw_text_runs(w, p)?;
 
     end_tag(w, "hp:run")?;
 
@@ -269,6 +343,74 @@ fn write_draw_text_paragraph<W: Write>(
     end_tag(w, "hp:linesegarray")?;
 
     end_tag(w, "hp:p")?;
+    Ok(())
+}
+
+/// 글상자 문단의 `<hp:run>` 내부 콘텐츠 — 텍스트 + 인라인 AutoNumber 컨트롤.
+///
+/// 글상자(footer 쪽번호 등)는 텍스트 사이에 쪽번호 컨트롤(AutoNumber)을 포함한다.
+/// HWP IR 에서 컨트롤 문자는 폭 8 의 placeholder 로 `char_offsets` 에 자리를 차지하므로,
+/// 텍스트 char_offsets 의 점프(>=8) 위치에 다음 AutoNumber 컨트롤을 끼워 넣는다.
+/// (section.rs `render_run_content` 와 동일한 +8 규칙.)
+///
+/// AutoNumber 외 컨트롤은 글상자에서 드물고 위험하므로 무시(텍스트는 보존).
+fn write_draw_text_runs<W: Write>(w: &mut Writer<W>, p: &Paragraph) -> Result<(), SerializeError> {
+    let auto_nums: Vec<&AutoNumber> = p
+        .controls
+        .iter()
+        .filter_map(|c| match c {
+            Control::AutoNumber(an) => Some(an),
+            _ => None,
+        })
+        .collect();
+
+    // 컨트롤 없음: 기존 단순 경로 (회귀 0).
+    if auto_nums.is_empty() {
+        start_tag(w, "hp:t")?;
+        w.write_event(quick_xml::events::Event::Text(
+            quick_xml::events::BytesText::new(&super::utils::xml_escape(&p.text)),
+        ))
+        .map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
+        end_tag(w, "hp:t")?;
+        return Ok(());
+    }
+
+    // char_offsets 점프(>=8)마다 다음 AutoNumber 삽입.
+    let chars: Vec<char> = p.text.chars().collect();
+    let mut buf = String::new();
+    let mut an_idx = 0usize;
+    let mut expected: u32 = 0;
+    let flush = |w: &mut Writer<W>, buf: &mut String| -> Result<(), SerializeError> {
+        if !buf.is_empty() {
+            start_tag(w, "hp:t")?;
+            w.write_event(quick_xml::events::Event::Text(
+                quick_xml::events::BytesText::new(&super::utils::xml_escape(buf)),
+            ))
+            .map_err(|e| SerializeError::XmlError(format!("drawText text: {e}")))?;
+            end_tag(w, "hp:t")?;
+            buf.clear();
+        }
+        Ok(())
+    };
+
+    for (i, &c) in chars.iter().enumerate() {
+        let pos = p.char_offsets.get(i).copied().unwrap_or(expected);
+        while an_idx < auto_nums.len() && pos >= expected.saturating_add(8) {
+            flush(w, &mut buf)?;
+            write_auto_num(w, auto_nums[an_idx])?;
+            an_idx += 1;
+            expected = expected.saturating_add(8);
+        }
+        buf.push(c);
+        // BMP 문자는 UTF-16 1 코드유닛 (char_offsets 단위).
+        expected = pos.max(expected).saturating_add(1);
+    }
+    flush(w, &mut buf)?;
+    // 남은 AutoNumber (말미).
+    while an_idx < auto_nums.len() {
+        write_auto_num(w, auto_nums[an_idx])?;
+        an_idx += 1;
+    }
     Ok(())
 }
 
