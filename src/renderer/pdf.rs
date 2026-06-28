@@ -65,7 +65,382 @@ fn add_font_fallbacks(svg: &str) -> String {
     // 연속 ASCII 조각(S#1. / PAGE / MEMO 등)을 단어 단위 <text>로 병합하여
     // 대체 폰트의 자연 advance 를 쓰게 한다. 장평(scale)·페이지 번호 보존은
     // merge_ascii_text_runs 내부 merge key(스타일+y+scale 완전일치)가 담당한다.
-    merge_ascii_text_runs(&with_fallbacks)
+    let merged = merge_ascii_text_runs(&with_fallbacks);
+    // 문장부호 글리프 겹침 보정 (v5). HWP line_seg 의 baked advance 가 렌더 폰트
+    // (Noto Serif/Sans CJK) 의 실제 글리프 폭보다 좁은 `…`/`—`/`.`/`(` 등에서
+    // 다음 글자가 앞 글자 위에 겹쳐 그려지는 결함을 PDF 변환 단계에서만 보정한다.
+    fix_glyph_overlap(&merged)
+}
+
+// ── 문장부호 글리프 겹침 보정 (v5) ────────────────────────────────────
+//
+// 결함: HWP line_seg 의 char 위치는 한컴 메트릭 DB(HCR Batang 등) 기반 advance 로
+// 산출되는데, PDF 렌더 폰트는 Noto Serif/Sans CJK 다. `…`(1.0em) `—`(0.89em)
+// `.`(0.327em) 등은 메트릭 DB advance 가 Noto 글리프 폭보다 좁아, 다음 글자가
+// 앞 글자 ink 위에 겹쳐 그려진다. 한글 음절은 side bearing 이 흡수해 ink 겹침이
+// 없으므로(검출 게이트의 25% 임계 미만) 영향받지 않는다.
+//
+// 보정 원칙(무회귀):
+//   - draw 위치(SVG <text> x)만 PDF 변환 직전에 이동. compute_char_positions /
+//     줄바꿈 / 편집기 커서는 불변 → 페이지수·줄수 불변.
+//   - 겹침이 실제 발생하는 인접쌍에만 적용(검출 게이트와 동일한 advance-box
+//     비교; pymupdf char bbox 폭 = advance). 한글→한글 정상쌍은 25% 임계 미만
+//     이라 미적용.
+//   - 같은 줄(y 동일) 안에서 deficit 누적 shift 를 우측으로 전파하되, 뒤따르는
+//     공백/간격(슬랙) 으로 흡수해 줄 끝 글자가 셀 보더를 넘어 클립되지 않게 한다.
+
+/// 렌더 폰트(Noto) 글리프 메트릭 1글자 — em 단위(1000 upm 정규화).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct GlyphMetric {
+    /// 가로 advance (em). 검출 게이트(pymupdf char bbox 폭)와 동일 기준.
+    advance: f32,
+}
+
+/// Noto Serif/Sans CJK 글리프 메트릭 조회기. ttf-parser 로 1회 로드 후 캐시.
+#[cfg(not(target_arch = "wasm32"))]
+struct NotoMetrics {
+    serif: Option<Vec<u8>>,
+    sans: Option<Vec<u8>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn noto_metrics() -> &'static NotoMetrics {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<NotoMetrics> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // create_fontdb 와 동일한 탐색 경로. 렌더 시 CWD(packages/api) 기준.
+        let dirs = [
+            "ttfs", "ttfs/windows", "ttfs/hwp",
+            "assets/fonts", "dist/assets/fonts",
+            "packages/api/ttfs",
+            "packages/api/assets/fonts", "packages/api/dist/assets/fonts",
+        ];
+        let read_first = |names: &[&str]| -> Option<Vec<u8>> {
+            for d in &dirs {
+                for n in names {
+                    let p = std::path::Path::new(d).join(n);
+                    if let Ok(data) = std::fs::read(&p) {
+                        return Some(data);
+                    }
+                }
+            }
+            None
+        };
+        NotoMetrics {
+            serif: read_first(&["NotoSerifCJK-Regular.ttc", "NotoSerifCJK-Regular.otf"]),
+            sans: read_first(&["NotoSansCJK-Regular.ttc", "NotoSansCJK-Regular.otf"]),
+        }
+    })
+}
+
+/// font-family 문자열로 Serif/Sans 선택 후 글리프 메트릭 조회.
+/// 폰트 미적재/글리프 미존재 시 None → 호출측은 겹침 보정을 건너뛴다.
+#[cfg(not(target_arch = "wasm32"))]
+fn lookup_glyph_metric(font_family: &str, c: char) -> Option<GlyphMetric> {
+    let m = noto_metrics();
+    let is_serif = font_family.contains("Serif") || font_family.contains("바탕")
+        || font_family.contains("명조") || font_family.contains("Batang");
+    let data = if is_serif { m.serif.as_ref() } else { m.sans.as_ref() }
+        .or(m.serif.as_ref())
+        .or(m.sans.as_ref())?;
+    let face = ttf_parser::Face::parse(data, 0).ok()?;
+    let upm = face.units_per_em() as f32;
+    if upm <= 0.0 { return None; }
+    let gid = face.glyph_index(c)?;
+    let adv = face.glyph_hor_advance(gid)? as f32 / upm;
+    // svg2pdf/usvg(rustybuzz) 가 ASCII 숫자를 cmap 기본 글리프(proportional,
+    // ~0.471em) 가 아니라 더 넓은 폭으로 셰이핑한다. 관측 렌더 폭은 템플릿/
+    // 폰트크기에 따라 0.55~0.59em 으로 변동하므로, 병합 마커 런(S#11./S#31.)
+    // 의 렌더 폭을 과소추정해 겹침을 놓치지 않도록 0.6em 으로 보정한다.
+    // 과대추정해도 shift 가 수 px 더 우측으로 갈 뿐(셀/페이지 넘침 없음) 무해.
+    let adv = if c.is_ascii_digit() { adv.max(0.6) } else { adv };
+    Some(GlyphMetric { advance: adv })
+}
+
+/// 파싱된 SVG <text> 요소(겹침 보정 전용 표현).
+#[cfg(not(target_arch = "wasm32"))]
+struct GlyphTextElem {
+    /// scale(S,1) 형식이면 true, x="" 형식이면 false.
+    is_transform: bool,
+    /// 현재 origin x (보정으로 갱신).
+    x: f64,
+    /// y 좌표 문자열(줄 식별 키). transform 의 경우 translate 의 Y.
+    y: String,
+    ratio: f64,
+    font_size: f64,
+    font_family: String,
+    /// 언이스케이프된 payload(병합 ASCII run 은 여러 글자).
+    payload: String,
+}
+
+/// metric DB advance 가 Noto 글리프 폭보다 좁아 겹침을 유발하는 좁은 문장부호.
+/// 이런 글자(또는 이 글자로 끝나는 마커 런) 뒤에서는 작은 절대 tol 로 겹침을
+/// 판정한다(한글→한글 25% 보호 규칙 우회). 한글/전각은 제외.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_narrow_overlap_punct(c: char) -> bool {
+    matches!(c,
+        '.' | ',' | ':' | ';' | '!' | '?' | '~' | '/' | '-'
+        | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+        | '\'' | '"' | '`'
+        | '\u{2026}' // …
+        | '\u{2014}' // —
+        | '\u{2013}' // –
+        | '\u{2015}' // ―
+        | '\u{00B7}' // ·
+    )
+}
+
+/// payload 전체의 on-page advance 폭(렌더 폰트 기준). 한 글자라도 메트릭이 없으면
+/// 그 글자는 폴백 폭(0.5em)으로 근사한다.
+#[cfg(not(target_arch = "wasm32"))]
+fn payload_advance_px(elem: &GlyphTextElem) -> f64 {
+    let mut total = 0.0_f64;
+    for c in elem.payload.chars() {
+        let adv_em = lookup_glyph_metric(&elem.font_family, c)
+            .map(|m| m.advance as f64)
+            .unwrap_or(0.5);
+        total += adv_em * elem.font_size * elem.ratio;
+    }
+    total
+}
+
+/// 같은 줄(y 동일, 연속) 안의 인접 <text> 글리프 겹침을 우측 shift 로 제거한다.
+#[cfg(not(target_arch = "wasm32"))]
+fn fix_glyph_overlap(svg: &str) -> String {
+    let lines: Vec<&str> = svg.lines().collect();
+    let parsed: Vec<Option<GlyphTextElem>> = {
+        let mut v: Vec<Option<GlyphTextElem>> = Vec::with_capacity(lines.len());
+        for l in lines.iter() {
+            v.push(parse_glyph_text_line(l));
+        }
+        v
+    };
+
+    // 같은 줄(y 동일) 연속 요소를 그룹으로 처리. 비-text 라인이 끼면 그룹 끊김.
+    let mut group: Vec<usize> = Vec::new(); // parsed 인덱스
+    let mut group_y: Option<String> = None;
+    let mut new_x: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+
+    let flush = |group: &mut Vec<usize>,
+                 parsed: &[Option<GlyphTextElem>],
+                 new_x: &mut std::collections::HashMap<usize, f64>| {
+        if group.len() < 2 {
+            group.clear();
+            return;
+        }
+        // 검출 게이트(detect-glyph-overlap.py)는 PDF 글리프의 advance-box(=origin
+        // ~ origin+advance) 끼리 비교한다(pymupdf rawdict char bbox 폭 = advance).
+        // 따라서 보정도 advance-box 기준으로, 게이트와 동일한 임계로 판정한다:
+        //   overlap = prev.origin + prev_adv − cur.origin
+        //   flag if overlap > tol && overlap > cur_adv * 0.25
+        // 한글→한글은 deficit(≈0.14em) < cur_adv 25%(≈0.24em) 라 미플래그 → 불변.
+        // tol 은 게이트(1.0pt)보다 작게 잡아 잔여 여유 확보.
+        const TOL: f64 = 0.5;
+        let mut shift = 0.0_f64;
+        for k in 1..group.len() {
+            let prev_i = group[k - 1];
+            let cur_i = group[k];
+            let prev_right = {
+                let p = parsed[prev_i].as_ref().unwrap();
+                (p.x + shift) + payload_advance_px(p)
+            };
+            let c = parsed[cur_i].as_ref().unwrap();
+            let cur_x = c.x + shift;
+            // cur 의 첫 글자 advance(게이트는 cur 의 좌측 글자 폭으로 임계 판정).
+            let cur_adv = match c.payload.chars().next()
+                .and_then(|ch| lookup_glyph_metric(&c.font_family, ch)) {
+                Some(m) => (m.advance as f64) * c.font_size * c.ratio,
+                None => c.font_size * c.ratio * 0.5,
+            };
+            let overlap = prev_right - cur_x;
+            // prev 가 narrow punctuation(. … — – ~ ( ) ! ? , : ; / 등) 또는
+            // 그런 글자로 끝나는 마커 런(S#31. 등) 이면 metric DB 와 Noto 의 advance
+            // 차이가 누적돼 실제 겹침이 발생한다 → 작은 절대 tol 로 판정.
+            // prev 가 한글로 끝나면(한글→한글) deficit 가 작아 25% 임계로 보호한다.
+            let prev_ends_narrow = parsed[prev_i].as_ref()
+                .and_then(|p| p.payload.chars().last())
+                .map(is_narrow_overlap_punct)
+                .unwrap_or(false);
+            let trigger = if prev_ends_narrow {
+                overlap > TOL
+            } else {
+                overlap > TOL && overlap > cur_adv * 0.25
+            };
+            if trigger {
+                // cur origin 이 prev advance-box 끝에 닿도록 우측으로 민다.
+                shift += overlap;
+            } else if overlap < 0.0 && shift > 0.0 {
+                // prev 와 cur 사이에 여유(공백/간격) 가 있으면 그 슬랙으로 누적
+                // shift 를 흡수한다 → 마커가 밀어낸 줄 끝 글자(예: "/ 낮") 가
+                // 셀 보더를 넘어 클립되는 회귀 방지. 슬랙만큼만 shift 감소.
+                shift = (shift + overlap).max(0.0);
+            }
+            // 누적 shift 를 cur(및 이후)에 전파.
+            if shift > 0.0 {
+                new_x.insert(cur_i, c.x + shift);
+            }
+        }
+        group.clear();
+    };
+
+    for idx in 0..parsed.len() {
+        let elem_y = parsed[idx].as_ref().map(|e| e.y.clone());
+        match elem_y {
+            Some(y) => {
+                let same_line = group_y.as_deref() == Some(y.as_str());
+                if !same_line {
+                    flush(&mut group, &parsed, &mut new_x);
+                    group_y = Some(y);
+                }
+                group.push(idx);
+            }
+            None => {
+                flush(&mut group, &parsed, &mut new_x);
+                group_y = None;
+            }
+        }
+    }
+    flush(&mut group, &parsed, &mut new_x);
+
+    if new_x.is_empty() {
+        return svg.to_string();
+    }
+
+    // 변경된 요소만 x 재작성, 나머지는 원본 라인 보존.
+    let mut out = String::with_capacity(svg.len() + new_x.len() * 8);
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(&nx) = new_x.get(&i) {
+            if let Some(elem) = parsed[i].as_ref() {
+                out.push_str(&rewrite_glyph_text_x(l, elem.is_transform, nx));
+            } else {
+                out.push_str(l);
+            }
+        } else {
+            out.push_str(l);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// SVG <text> 한 줄을 겹침 보정용으로 파싱. 단일/장평 두 형식 지원.
+/// 멀티 글자 payload(병합된 ASCII run)도 first/last 글자만 추출해 처리.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_glyph_text_line(line: &str) -> Option<GlyphTextElem> {
+    if line.contains("<tspan") {
+        return None;
+    }
+    let text_start = line.find("<text")?;
+    let after_text = &line[text_start + 5..];
+    let tag_end_rel = after_text.find('>')?;
+    let open_tag = &after_text[..tag_end_rel];
+    let close_start = line.rfind("</text>")?;
+    let tag_end_abs = text_start + 5 + tag_end_rel;
+    if close_start <= tag_end_abs + 1 {
+        return None;
+    }
+    let payload = &line[tag_end_abs + 1..close_start];
+    let decoded = decode_xml_entities(payload);
+    // 공백 전용 payload 는 보정 대상 아님.
+    if decoded.trim().is_empty() {
+        return None;
+    }
+
+    let font_size = parse_font_size(open_tag).unwrap_or(16.0);
+    let font_family = parse_font_family(open_tag).unwrap_or_default();
+
+    if let Some(tf_pos) = open_tag.find("transform=\"translate(") {
+        let inner_start = tf_pos + "transform=\"translate(".len();
+        let inner_end = open_tag[inner_start..].find(')')? + inner_start;
+        let coords = &open_tag[inner_start..inner_end];
+        let comma = coords.find(',')?;
+        let x: f64 = coords[..comma].trim().parse().ok()?;
+        let y = coords[comma + 1..].trim().to_string();
+        let ratio = if let Some(sp) = open_tag[inner_end..].find("scale(") {
+            let s_start = inner_end + sp + "scale(".len();
+            let s_end = open_tag[s_start..].find(',').map(|p| p + s_start)
+                .or_else(|| open_tag[s_start..].find(')').map(|p| p + s_start))?;
+            open_tag[s_start..s_end].trim().parse().unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        Some(GlyphTextElem {
+            is_transform: true, x, y, ratio, font_size, font_family,
+            payload: decoded,
+        })
+    } else {
+        let x_marker = " x=\"";
+        let x_pos = open_tag.find(x_marker)? + x_marker.len();
+        let x_end = open_tag[x_pos..].find('"')? + x_pos;
+        let x: f64 = open_tag[x_pos..x_end].trim().parse().ok()?;
+        let y_marker = " y=\"";
+        let y_pos = open_tag[x_end..].find(y_marker)? + x_end + y_marker.len();
+        let y_end = open_tag[y_pos..].find('"')? + y_pos;
+        let y = open_tag[y_pos..y_end].to_string();
+        Some(GlyphTextElem {
+            is_transform: false, x, y, ratio: 1.0, font_size, font_family,
+            payload: decoded,
+        })
+    }
+}
+
+/// <text> 라인의 x(또는 translate 의 X) 만 새 값으로 교체.
+#[cfg(not(target_arch = "wasm32"))]
+fn rewrite_glyph_text_x(line: &str, is_transform: bool, new_x: f64) -> String {
+    let nx = format_number(new_x);
+    if is_transform {
+        if let Some(tf_pos) = line.find("transform=\"translate(") {
+            let inner_start = tf_pos + "transform=\"translate(".len();
+            if let Some(rel_end) = line[inner_start..].find(')') {
+                let inner_end = inner_start + rel_end;
+                let coords = &line[inner_start..inner_end];
+                if let Some(comma) = coords.find(',') {
+                    let y = &coords[comma + 1..];
+                    let mut out = String::with_capacity(line.len() + 4);
+                    out.push_str(&line[..inner_start]);
+                    out.push_str(&nx);
+                    out.push(',');
+                    out.push_str(y);
+                    out.push_str(&line[inner_end..]);
+                    return out;
+                }
+            }
+        }
+    } else if let Some(x_pos) = line.find(" x=\"") {
+        let val_start = x_pos + " x=\"".len();
+        if let Some(rel_end) = line[val_start..].find('"') {
+            let val_end = val_start + rel_end;
+            let mut out = String::with_capacity(line.len() + 4);
+            out.push_str(&line[..val_start]);
+            out.push_str(&nx);
+            out.push_str(&line[val_end..]);
+            return out;
+        }
+    }
+    line.to_string()
+}
+
+/// open_tag 에서 font-family 값 추출(따옴표 안 전체).
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_font_family(s: &str) -> Option<String> {
+    let marker = "font-family=\"";
+    let start = s.find(marker)? + marker.len();
+    let end = s[start..].find('"')? + start;
+    Some(s[start..end].to_string())
+}
+
+/// payload 의 XML 엔티티(&amp; &lt; &gt; &quot; &apos;) 를 원문자로 복원.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// 한 줄에서 추출한 단일 글자 `<text>` 정보.
@@ -569,5 +944,93 @@ mod merge_tests {
         // payload 가 ASCII 아니므로 게이트 탈락 → 원본 2줄 그대로.
         assert_eq!(out.matches("<text").count(), 2, "{out}");
         assert!(out.contains(">아</text>") && out.contains(">파</text>"), "{out}");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod overlap_tests {
+    use super::*;
+
+    const SERIF: &str = "-윤명조130,&apos;Noto Serif CJK KR&apos;,serif";
+
+    /// Noto 폰트가 ttfs/ 에 적재되어 있어야 메트릭 의존 테스트가 의미 있다.
+    fn fonts_available() -> bool {
+        let m = noto_metrics();
+        m.serif.is_some() || m.sans.is_some()
+    }
+
+    #[test]
+    fn parse_transform_form() {
+        let line = format!(
+            "<text transform=\"translate(255.24,279.74) scale(0.9500,1)\" font-family=\"{SERIF}\" font-size=\"20\" fill=\"#000000\">S#11.</text>",
+        );
+        let e = parse_glyph_text_line(&line).expect("parsed");
+        assert!(e.is_transform);
+        assert!((e.x - 255.24).abs() < 1e-6);
+        assert_eq!(e.y, "279.74");
+        assert!((e.ratio - 0.95).abs() < 1e-6);
+        assert!((e.font_size - 20.0).abs() < 1e-6);
+        assert_eq!(e.payload, "S#11.");
+    }
+
+    #[test]
+    fn parse_xy_form_and_entities() {
+        let line = "<text x=\"100.5\" y=\"50\" font-family=\"Noto Sans CJK KR,sans-serif\" font-size=\"16\">&apos;</text>";
+        let e = parse_glyph_text_line(line).expect("parsed");
+        assert!(!e.is_transform);
+        assert!((e.x - 100.5).abs() < 1e-6);
+        assert_eq!(e.y, "50");
+        assert!((e.ratio - 1.0).abs() < 1e-6);
+        assert_eq!(e.payload, "'");
+    }
+
+    #[test]
+    fn rewrite_keeps_y_and_scale() {
+        let line = "<text transform=\"translate(10,20) scale(0.9500,1)\" font-size=\"20\">.</text>";
+        let out = rewrite_glyph_text_x(line, true, 33.5);
+        assert!(out.contains("translate(33.5,20)"), "{out}");
+        assert!(out.contains("scale(0.9500,1)"), "{out}");
+        assert!(out.ends_with(">.</text>"), "{out}");
+
+        let xy = "<text x=\"10\" y=\"20\" font-size=\"20\">.</text>";
+        let out2 = rewrite_glyph_text_x(xy, false, 33.5);
+        assert!(out2.contains("x=\"33.5\""), "{out2}");
+        assert!(out2.contains("y=\"20\""), "{out2}");
+    }
+
+    // 한글→한글 인접쌍은 side bearing 이 흡수(검출 게이트 25% 미만)하므로
+    // 겹침 보정이 위치를 건드리면 안 된다 (줄 길이 증가 회귀 방지).
+    #[test]
+    fn cjk_pair_not_shifted() {
+        if !fonts_available() { return; }
+        // 한컴 baked advance(0.872em) 간격으로 배치된 두 한글 음절.
+        let gap = 0.872 * 20.0 * 0.95; // ≈ 16.57px
+        let svg = format!(
+            "<text transform=\"translate(100,50) scale(0.9500,1)\" font-family=\"{SERIF}\" font-size=\"20\">건</text>\n\
+             <text transform=\"translate({x2},50) scale(0.9500,1)\" font-family=\"{SERIF}\" font-size=\"20\">향</text>",
+            x2 = 100.0 + gap,
+        );
+        let out = fix_glyph_overlap(&svg);
+        // 위치(translate X) 가 그대로여야 한다. 후행 개행만 다를 수 있음.
+        assert_eq!(out.trim_end(), svg.trim_end(), "CJK pair must be untouched:\n{out}");
+        let hyang = parse_glyph_text_line(out.lines().nth(1).unwrap()).unwrap();
+        assert!((hyang.x - (100.0 + gap)).abs() < 1e-3, "향 x unchanged: {}", hyang.x);
+    }
+
+    // 한글 뒤 마침표(.) 는 baked advance 가 한글 글리프 폭보다 좁아 겹친다 →
+    // 마침표(및 이후)가 우측으로 밀려야 한다.
+    #[test]
+    fn punct_after_cjk_is_shifted() {
+        if !fonts_available() { return; }
+        // 한글 baked advance(0.79em) 로 좁게 배치 → 마침표가 한글 ink 위에 겹침.
+        let x_dot = 100.0 + 0.79 * 20.0 * 0.95; // ≈ 115.0
+        let svg = format!(
+            "<text transform=\"translate(100,50) scale(0.9500,1)\" font-family=\"{SERIF}\" font-size=\"20\">도</text>\n\
+             <text transform=\"translate({x_dot},50) scale(0.9500,1)\" font-family=\"{SERIF}\" font-size=\"20\">.</text>",
+        );
+        let out = fix_glyph_overlap(&svg);
+        // 마침표 x 가 원래(x_dot)보다 우측으로 이동했는지 확인.
+        let new_dot = parse_glyph_text_line(out.lines().nth(1).unwrap()).unwrap();
+        assert!(new_dot.x > x_dot + 0.5, "dot must shift right: {} <= {}", new_dot.x, x_dot);
     }
 }
